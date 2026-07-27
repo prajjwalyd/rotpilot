@@ -19,6 +19,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { CONFIG_DIR, ensureConfigDir } from '../config.js';
 import type { EngramMemory } from './engram.js';
+import { renderMessages, type ConvMessage } from './transcript.js';
 import { log } from '../log.js';
 
 export const MODEL = process.env.ROTPILOT_SUMMARY_MODEL || 'claude-haiku-4-5';
@@ -199,4 +200,25 @@ export function funRecap(
 /** Question mode: answer the user's question from the retrieved fragments. */
 export function funAnswer(question: string, mems: EngramMemory[], rotContext?: string): Promise<string | null> {
   return runClaude(answerPrompt(question, mems, rotContext));
+}
+
+/** The exact prompt for a LOCAL (Tier-0) recap: same voice + shape as the Engram
+ * recap, but the input is a compact slice of the live session transcript rather
+ * than pre-extracted memory fragments. Also what `recap --raw` shows locally. */
+export function localRecapPrompt(project: string, messages: ConvMessage[], rotContext?: string): string {
+  return (
+    `${VOICE}\n${ctxBlock(rotContext)}\nBelow is the slice of the Claude Code session in the project ` +
+    `"${project}" that scrolled past while the user rotted — their prompts, Claude's narration, and the ` +
+    `edits/commands it ran (oldest to newest, "→" lines are tool actions). Write the recap in this exact shape:\n` +
+    '1. ONE punchy roast line about them rotting while claude worked — reference what claude actually did.\n' +
+    '2. a section headed "claude handled" — 1-3 tight bullets of what got DONE (the flex).\n' +
+    '3. a section headed "your move" — 1-3 bullets of what still needs THEM (open questions, approvals, ' +
+    'unfinished work). Omit this section entirely if nothing is unresolved.\n' +
+    `${HEADER_RULE}\n\nsession:\n${renderMessages(messages)}`
+  );
+}
+
+/** Tier-0 recap of the current session, synthesized by the local Haiku. */
+export function funLocalRecap(project: string, messages: ConvMessage[], rotContext?: string): Promise<string | null> {
+  return runClaude(localRecapPrompt(project, messages, rotContext));
 }

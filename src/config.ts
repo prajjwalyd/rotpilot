@@ -5,6 +5,16 @@ import os from 'node:os';
 // NOTE: on/off is NOT a config flag — rotpilot is on wherever its hooks live in
 // the project's .claude/settings.local.json (see hooks/install.ts), and the
 // hook client checks that file directly.
+
+/** A self-imposed rot ration: at most `limitSec` per day/week. `since` anchors
+ * the "days under budget" streak. rotpilot doles it out and taunts you at the
+ * line — it's the warden's version of a limit, not an earnest promise. */
+export interface Budget {
+  limitSec: number;
+  period: 'day' | 'week';
+  since: string; // ISO — when the budget was set
+}
+
 export interface RotpilotConfig {
   feed: 'localLoop' | 'shorts' | 'instagram';
   fps: number;
@@ -35,6 +45,8 @@ export interface RotpilotConfig {
    * with `rotpilot engram transcripts on`. */
   engram: { userId: string; shareTranscripts: boolean };
   allowInstagram: boolean;
+  /** optional self-imposed rot ration; unset = no budget (`rotpilot budget`) */
+  budget?: Budget;
 }
 
 export const CONFIG_DIR = path.join(os.homedir(), '.config', 'rotpilot');

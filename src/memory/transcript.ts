@@ -31,7 +31,12 @@ const NOISE_TOOLS = new Set(['Read', 'Grep', 'Glob', 'LS', 'NotebookRead', 'Todo
  * entries, read-only exploration (NOISE_TOOLS), and tool RESULTS (huge, and the
  * narration already states outcomes).
  */
-export function transcriptWindow(transcriptPath: string, sinceMs: number, untilMs: number): ConvMessage[] {
+export function transcriptWindow(
+  transcriptPath: string,
+  sinceMs: number,
+  untilMs: number,
+  maxMessages = 80,
+): ConvMessage[] {
   const out: ConvMessage[] = [];
   const lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
   for (const line of lines) {
@@ -73,11 +78,58 @@ export function transcriptWindow(transcriptPath: string, sinceMs: number, untilM
       ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
     });
   }
-  return out.slice(-80); // cap the payload; the tail is what they missed most recently
+  return out.slice(-maxMessages); // cap the payload; the tail is what they missed most recently
 }
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const COMMAND_TOOLS = new Set(['Bash', 'BashOutput']);
+
+/** Pull the one field that says what a tool call actually DID out of its clipped
+ * (often mid-string-truncated) JSON args — regex, not JSON.parse, so a truncated
+ * blob still yields the file path or command instead of nothing. */
+function salientArg(name: string, argsJson: string): string {
+  const grab = (key: string): string | null => {
+    const m = argsJson.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`));
+    return m ? m[1] : null;
+  };
+  if (EDIT_TOOLS.has(name)) {
+    const f = grab('file_path') ?? grab('notebook_path');
+    return f ? `edit ${f}` : 'edit a file';
+  }
+  if (COMMAND_TOOLS.has(name)) {
+    const c = grab('command');
+    return c ? `run ${clip(c.replace(/\s+/g, ' '), 120)}` : 'run a command';
+  }
+  const q = grab('pattern') ?? grab('query') ?? grab('url') ?? grab('description') ?? grab('prompt');
+  return q ? `${name}: ${clip(q, 80)}` : name;
+}
+
+/**
+ * Compact, token-lean rendering of a transcript window for the LOCAL recap
+ * synthesizer — Claude's prose plus one short line per consequential tool call
+ * ("→ edit posts.py", "→ run npm test"), oldest→newest, kept within a char
+ * budget from the RECENT end so a long session never buries Haiku in context.
+ */
+export function renderMessages(messages: ConvMessage[], maxChars = 9000): string {
+  const blocks: string[] = [];
+  let used = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    const lines: string[] = [];
+    if (m.role === 'user') {
+      if (m.content) lines.push(`you: ${m.content}`);
+    } else if (m.role === 'assistant') {
+      if (m.content) lines.push(`claude: ${m.content}`);
+      for (const t of m.tool_calls ?? []) lines.push(`  → ${salientArg(t.function.name, t.function.arguments)}`);
+    }
+    if (!lines.length) continue;
+    const block = lines.join('\n');
+    if (used + block.length > maxChars && blocks.length) break; // keep the most recent within budget
+    used += block.length + 1;
+    blocks.push(block);
+  }
+  return blocks.reverse().join('\n');
+}
 
 /**
  * The instant dopamine: price a rot window in one dim line for the pause

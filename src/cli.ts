@@ -304,18 +304,18 @@ async function mainCli(): Promise<void> {
           console.log('    under your key. turn it off any time: rotpilot engram transcripts off');
         } else {
           console.log(ui.ok('transcript sharing OFF — no session content leaves this machine.'));
-          console.log('  (vows + stats receipts still work; `rotpilot recap` will go stale.)');
+          console.log('  (local `rotpilot recap`, stats & budget still work; `recap --all` will go stale.)');
         }
         return;
       }
 
       if (action !== 'check') {
         console.log('');
-        console.log(ui.heading('rotpilot × engram — the "what you missed" memory'));
+        console.log(ui.heading('engram — optional memory for cross-session recap'));
         console.log('');
         console.log(
           ui.wrapText(
-            "rotpilot exists to make you NOT watch while claude works. engram remembers what you missed: each rot window's slice of the session transcript, split into what claude DID and what still NEEDS YOU. `rotpilot recap` gets it back — even weeks later, even across projects.",
+"`rotpilot recap` already works locally for the current session, no setup. Engram is optional: connect it and each rot window's transcript slice is stored — split into what claude DID and what still NEEDS YOU — so recap can reach back across past sessions and other projects with `--all` or a question. Off unless you set it up here.",
           ),
         );
         console.log('');
@@ -408,32 +408,67 @@ async function mainCli(): Promise<void> {
     });
 
   program
-    .command('vow <promise...>')
-    .description('put a promise about your rot habit on the record — stats will hold you to it')
-    .action(async (words: string[]) => {
-      const { addVow } = await import('./memory/store.js');
-      const text = words.join(' ');
-      addVow(text);
-      console.log(ui.ok(`on the record: "${text}"`));
-      console.log(ui.tip('rotpilot never forgets — receipts in', 'rotpilot stats'));
+    .command('budget [amount]')
+    .description('set a rot ration stats holds you to — `budget 10m` (daily) · `budget 1h --weekly` · `budget off`')
+    .option('--daily', 'a daily budget (default)')
+    .option('--weekly', 'a weekly budget instead of daily')
+    .action(async (amount: string | undefined, opts: { daily?: boolean; weekly?: boolean }) => {
+      const { parseDuration, humanDuration } = await import('./memory/budget.js');
+      const cfg = loadConfig();
+      // no amount → show the current ration
+      if (!amount) {
+        if (cfg.budget) {
+          console.log(ui.ok(`rot budget: ${ui.bold(`${humanDuration(cfg.budget.limitSec)} per ${cfg.budget.period}`)}`));
+          console.log(ui.tip('watch it burn —', 'rotpilot stats'));
+        } else {
+          console.log(ui.no('no rot budget set.'));
+          console.log(ui.tip('set one —', 'rotpilot budget 10m'));
+        }
+        return;
+      }
+      if (['off', 'none', 'clear'].includes(amount.toLowerCase())) {
+        if (!cfg.budget) {
+          console.log(ui.note('no budget was set.'));
+          return;
+        }
+        delete cfg.budget;
+        saveConfig(cfg);
+        console.log(ui.ok('rot budget cleared. rot freely, you animal.'));
+        return;
+      }
+      if (opts.daily && opts.weekly) {
+        console.log(ui.no('pick one: --daily or --weekly, not both.'));
+        process.exitCode = 1;
+        return;
+      }
+      const sec = parseDuration(amount);
+      if (sec == null) {
+        console.log(ui.no('bad amount. try `rotpilot budget 10m` or `rotpilot budget 1h --weekly`.'));
+        process.exitCode = 1;
+        return;
+      }
+      const period: 'day' | 'week' = opts.weekly ? 'week' : 'day';
+      cfg.budget = { limitSec: sec, period, since: new Date().toISOString() };
+      saveConfig(cfg);
+      console.log(ui.ok(`rot budget: ${ui.bold(`${humanDuration(sec)} per ${period}`)}`));
+      console.log(ui.note('rotpilot rations you and rats you out in stats the moment you blow it'));
+      console.log(ui.tip('watch it burn —', 'rotpilot stats'));
     });
 
   program
     .command('recap [question...]')
-    .description('what you missed: everything claude did while you rotted (needs engram + transcripts on)')
-    .option('--raw', 'print the exact prompt + fragments sent to haiku (no synthesis) — for debugging')
-    .action(async (words: string[], opts: { raw?: boolean }) => {
+    .description('what you missed while you rotted — this session, local & instant (--all: your whole history · "question": ask, both via engram)')
+    .option('--raw', 'print the exact prompt sent to haiku (no synthesis) — for debugging')
+    .option('--since <dur>', 'local: only summarize the last window, e.g. 30m or 2h (default: whole session)')
+    .option('--all', 'recap everything engram remembers for this repo, across every past session')
+    .action(async (words: string[], opts: { raw?: boolean; since?: string; all?: boolean }) => {
       const { engramEnabled, getRecap, searchRecap } = await import('./memory/engram.js');
-      const { summarizerAvailable, funRecap, funAnswer, recapPrompt, answerPrompt, MODEL } =
+      const { summarizerAvailable, funRecap, funAnswer, funLocalRecap, recapPrompt, answerPrompt, localRecapPrompt, MODEL } =
         await import('./memory/summarize.js');
       const { rotContext } = await import('./memory/store.js');
-      if (!engramEnabled()) {
-        console.log(ui.no('recap needs a memory. run `rotpilot engram` to set one up.'));
-        process.exitCode = 1;
-        return;
-      }
       const cfg = loadConfig();
       const ctx = rotContext();
+      const project = path.basename(process.cwd());
       // fallback (no claude / offline): strip the repeated "On <date>, Claude "
       // lead-in so the raw list at least reads cleanly
       const clean = (s: string) =>
@@ -459,17 +494,38 @@ async function mainCli(): Promise<void> {
         console.log('');
         console.log(
           ui.dim(
-            `── raw · ${kind} · model ${MODEL} · ${n} fragment${n === 1 ? '' : 's'} · summarizer ${summarizerAvailable() ? 'available' : 'unavailable'} ──`,
+            `── raw · ${kind} · model ${MODEL} · ${n} unit${n === 1 ? '' : 's'} · summarizer ${summarizerAvailable() ? 'available' : 'unavailable'} ──`,
           ),
         );
         console.log('');
         console.log(prompt);
         console.log('');
       };
+      // the two cross-session modes (--all, "question") need the optional Engram
+      // memory; say so plainly instead of erroring, so local recap still stands
+      // on its own and Engram reads as optional, not a paywall
+      const needsEngram = (what: string) => {
+        console.log('');
+        console.log(
+          ui.card('recap · needs engram', [
+            {
+              body: [
+                ui.dim(`  ${what}`),
+                ui.dim('  reads across sessions, which uses engram — an optional memory you connect yourself.'),
+                ui.dim('  this session already works locally: just run `rotpilot recap`.'),
+              ],
+            },
+          ]),
+        );
+        console.log('');
+        console.log(ui.tip('optional, if you want it —', 'rotpilot engram'));
+        console.log('');
+      };
 
+      // ── question mode: semantic Q&A across ALL projects (engram only) ──
       if (words.length) {
-        // question mode: semantic search across ALL projects' missed work
         const q = words.join(' ');
+        if (!engramEnabled()) return needsEngram(`asking "${q}" across every repo you've rotted through`);
         const stop = ui.spinner(`catching you up on "${q}"…`);
         const r = await searchRecap(q);
         const synth =
@@ -493,29 +549,85 @@ async function mainCli(): Promise<void> {
         return;
       }
 
-      const project = path.basename(process.cwd());
-      const stop = ui.spinner('catching you up…');
-      const recap = await getRecap(project);
-      const synth =
-        !opts.raw && recap && (recap.looseEnds.length || recap.work.length) && summarizerAvailable()
-          ? await funRecap(project, recap.looseEnds, recap.work, ctx)
-          : null;
-      stop();
-      if (!recap) {
-        console.log(ui.no('engram unreachable — try again, or `rotpilot engram check`.'));
-        process.exitCode = 1;
+      // ── --all: engram digest of this repo across every past session ──
+      if (opts.all) {
+        if (!engramEnabled()) return needsEngram('recapping this repo across every past session');
+        const stop = ui.spinner('reading your engram history…');
+        const recap = await getRecap(project);
+        const synth =
+          !opts.raw && recap && (recap.looseEnds.length || recap.work.length) && summarizerAvailable()
+            ? await funRecap(project, recap.looseEnds, recap.work, ctx)
+            : null;
+        stop();
+        if (!recap) {
+          console.log(ui.no('engram unreachable — try again, or `rotpilot engram check`.'));
+          process.exitCode = 1;
+          return;
+        }
+        if (opts.raw && (recap.looseEnds.length || recap.work.length))
+          return printRaw(
+            recapPrompt(project, recap.looseEnds, recap.work, ctx),
+            'recap',
+            recap.looseEnds.length + recap.work.length,
+          );
+        if (!recap.looseEnds.length && !recap.work.length) {
+          const msg = cfg.engram.shareTranscripts
+            ? `nothing on record for ${project} yet.\nrot a little; extraction runs async (queue can lag a few minutes).`
+            : `nothing on record for ${project} yet.\nthe transcript memory is OFF — turn it on with:\nrotpilot engram transcripts on`;
+          console.log('');
+          console.log(ui.card(`recap · ${project} · all sessions`, [{ body: msg.split('\n').map((l) => ui.dim('  ' + l)) }]));
+          console.log('');
+          return;
+        }
+        let sections: CardSection[];
+        if (synth) {
+          sections = [{ body: fmtSynth(synth).split('\n') }];
+        } else {
+          sections = [];
+          if (recap.work.length)
+            sections.push({ heading: 'claude handled', body: recap.work.map((m) => ui.wrapText('• ' + clean(m.content), '  ', 68)) });
+          if (recap.looseEnds.length)
+            sections.push({ heading: 'your move', body: recap.looseEnds.map((m) => ui.wrapText('• ' + clean(m.content), '  ', 68)) });
+        }
+        console.log('');
+        console.log(ui.card(`recap · ${project} · all sessions`, sections));
+        console.log('');
+        console.log(ui.tip('ask anything —', 'rotpilot recap "what was the image bug?"'));
+        console.log('');
         return;
       }
-      if (opts.raw && recap && (recap.looseEnds.length || recap.work.length))
-        return printRaw(
-          recapPrompt(project, recap.looseEnds, recap.work, ctx),
-          'recap',
-          recap.looseEnds.length + recap.work.length,
-        );
-      if (!recap.looseEnds.length && !recap.work.length) {
-        const msg = cfg.engram.shareTranscripts
-          ? `nothing on record for ${project} yet.\nrot a little; extraction runs async (queue can lag a few minutes).`
-          : `nothing on record for ${project} yet.\nthe transcript memory is OFF — turn it on with:\nrotpilot engram transcripts on`;
+
+      // ── default: Tier-0 LOCAL recap of the current session (no key, instant) ──
+      let sinceMs = 0;
+      if (opts.since) {
+        const { parseDuration } = await import('./memory/budget.js');
+        const sec = parseDuration(opts.since);
+        if (sec == null) {
+          console.log(ui.no('bad --since value. try 30m or 2h.'));
+          process.exitCode = 1;
+          return;
+        }
+        sinceMs = Date.now() - sec * 1000;
+      }
+      const { localWindow } = await import('./memory/local.js');
+      const stop = ui.spinner('catching you up on this session…');
+      const messages = localWindow(process.cwd(), sinceMs);
+      const claudeDid = messages.filter((m) => m.role === 'assistant' && (m.content || m.tool_calls?.length));
+      const synth =
+        !opts.raw && claudeDid.length && summarizerAvailable() ? await funLocalRecap(project, messages, ctx) : null;
+      stop();
+      if (opts.raw) {
+        if (!messages.length) {
+          console.log(ui.no("no session transcript found to summarize (run recap from the repo you're rotting in)."));
+          process.exitCode = 1;
+          return;
+        }
+        return printRaw(localRecapPrompt(project, messages, ctx), 'local', messages.length);
+      }
+      if (!claudeDid.length) {
+        const msg = messages.length
+          ? 'quiet session — claude did nothing worth catching up on in this window.'
+          : "couldn't find this session's transcript. run recap from the repo you're rotting in,\nor `rotpilot recap --all` for your engram history.";
         console.log('');
         console.log(ui.card(`recap · ${project}`, [{ body: msg.split('\n').map((l) => ui.dim('  ' + l)) }]));
         console.log('');
@@ -523,22 +635,25 @@ async function mainCli(): Promise<void> {
       }
       let sections: CardSection[];
       if (synth) {
-        // synth is one blob; its embedded "claude handled"/"your move" headers
-        // are already turned into ▎ headings by fmtSynth
         sections = [{ body: fmtSynth(synth).split('\n') }];
       } else {
-        // fallback: de-noised raw list as proper ▎ sections, same order as the
-        // synth shape (what got done, then what's left) so both modes read alike
-        sections = [];
-        if (recap.work.length)
-          sections.push({ heading: 'claude handled', body: recap.work.map((m) => ui.wrapText('• ' + clean(m.content), '  ', 68)) });
-        if (recap.looseEnds.length)
-          sections.push({ heading: 'your move', body: recap.looseEnds.map((m) => ui.wrapText('• ' + clean(m.content), '  ', 68)) });
+        // no local claude to synthesize — a de-noised list of what streamed by
+        const { missedLine } = await import('./memory/transcript.js');
+        const body: string[] = [];
+        const line = missedLine(messages);
+        if (line) body.push(ui.wrapText(line, '  ', 68));
+        for (const m of claudeDid.slice(-6)) {
+          const first = (m.content ?? '').split('\n').find((l) => l.trim());
+          if (first) body.push(ui.wrapText('• ' + first, '  ', 68));
+        }
+        sections = [{ heading: 'claude handled', body }];
       }
       console.log('');
       console.log(ui.card(`recap · ${project}`, sections));
       console.log('');
-      console.log(ui.tip('ask anything —', 'rotpilot recap "what was the image bug?"'));
+      if (engramEnabled())
+        console.log(ui.tip('ask across every repo —', 'rotpilot recap "what changed in auth?"'));
+      else console.log(ui.note('want recap across sessions & repos? connect the optional engram memory: rotpilot engram'));
       console.log('');
     });
 

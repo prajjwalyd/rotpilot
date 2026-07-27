@@ -1,7 +1,8 @@
 /** Local memory sink: one JSON file, append events, read for `stats`. */
 import fs from 'node:fs';
 import path from 'node:path';
-import { STORE_PATH, ensureConfigDir } from '../config.js';
+import { STORE_PATH, ensureConfigDir, loadConfig } from '../config.js';
+import { budgetContextLine } from './budget.js';
 
 export interface BreakEvent {
   ts: string; // ISO timestamp of the snap-back
@@ -14,15 +15,9 @@ export interface BreakEvent {
   responseLatencyMs?: number | null; // snap-back → your next action in Claude
 }
 
-export interface Vow {
-  ts: string; // ISO timestamp — anchors the stats receipts
-  text: string; // the promise, verbatim
-}
-
 interface Store {
   version: 1;
   events: BreakEvent[];
-  vows?: Vow[];
 }
 
 function read(): Store {
@@ -58,19 +53,9 @@ export function readEvents(): BreakEvent[] {
   return read().events;
 }
 
-/** Put a promise on the record (`rotpilot vow`) — stats will bring receipts. */
-export function addVow(text: string): void {
-  const s = read();
-  (s.vows ??= []).push({ ts: new Date().toISOString(), text });
-  write(s);
-}
-
-export function readVows(): Vow[] {
-  return read().vows ?? [];
-}
-
-/** A one-line factual rot summary for the recap synthesizer to cite: when you
- * last rotted, that break's length, and the week's tally. '' if no history. */
+/** A factual rot summary for the recap synthesizer to cite: when you last
+ * rotted, that break's length, the week's tally, and how you're doing against
+ * your rot budget (if set) so Haiku can rub it in. '' if no history. */
 export function rotContext(): string {
   const evs = read().events;
   if (!evs.length) return '';
@@ -86,10 +71,13 @@ export function rotContext(): string {
   const week = evs.filter((e) => Date.now() - Date.parse(e.ts) < 7 * 86400e3);
   const weekRot = week.reduce((s, e) => s + e.rotSeconds, 0);
   // phrased to be un-misreadable: "Nh ago" is elapsed-since, not time-spent
-  return (
-    `- their last rot break was ${ago} and lasted ${dur(last.rotSeconds)}${last.feed ? ` on the ${last.feed} feed` : ''}\n` +
-    `- in total this week they've rotted for ${dur(weekRot)} across ${week.length} break${week.length === 1 ? '' : 's'} while Claude worked`
-  );
+  const lines = [
+    `- their last rot break was ${ago} and lasted ${dur(last.rotSeconds)}${last.feed ? ` on the ${last.feed} feed` : ''}`,
+    `- in total this week they've rotted for ${dur(weekRot)} across ${week.length} break${week.length === 1 ? '' : 's'} while Claude worked`,
+  ];
+  const budgetLine = budgetContextLine(loadConfig().budget, evs, Date.now());
+  if (budgetLine) lines.push(budgetLine);
+  return lines.join('\n');
 }
 
 export function repoLabel(cwd?: string): string | undefined {

@@ -62,9 +62,9 @@ rotpilot is **per-project and terminal-only**: `rotpilot on` in a project turns 
 |---|---|
 | `rotpilot init` | install hooks into Claude Code (idempotent; `--uninstall` to remove) |
 | `rotpilot demo` | 30 seconds of the full loop, no Claude needed |
-| `rotpilot stats` | your rot report — total rot, longest rot, rot-by-weekday, rot ratio, fastest snap-back. screenshot it, you coward |
-| `rotpilot recap [question]` | what you missed: everything Claude did while you rotted (needs Engram) |
-| `rotpilot vow <promise>` | put a rot promise on the record — stats will hold you to it |
+| `rotpilot stats` | your rot report — rot ratio, an 8-week rot heatmap, trend vs usual, your budget meter. screenshot it, you coward |
+| `rotpilot recap` | what you missed this session — instant, local, no setup. `--all` / `"question"` reach across sessions & repos (Engram) |
+| `rotpilot budget <amount>` | set a rot ration stats holds you to — `budget 10m` (daily), `budget 1h --weekly`, `budget off` |
 | `rotpilot engram` | set up the optional Engram memory (`key` / `transcripts on\|off` / `check`) |
 | `rotpilot feed <name>` | switch feed: `localLoop` \| `shorts` \| `instagram` |
 | `rotpilot window <mode>` | `panel` (split beside Claude, default) \| `window` (separate) |
@@ -109,18 +109,20 @@ Every snap-back is recorded locally (`~/.config/rotpilot/rot.json`): what Claude
 
 Every snap-back screen prices what just streamed by, parsed locally from the session transcript — no key, no network, works from your first rot.
 
-`rotpilot vow "only 10 minutes of rot a day"` puts your intentions on the record (locally) — `rotpilot stats` brings receipts ("*19m of rot across 6 breaks since then*")
+`rotpilot recap` catches you up on **this session** the same way: it reads the current Claude Code transcript directly and synthesizes a sardonic briefing with **your own** Claude (the `claude` CLI you already have) — no key, no opt-in, nothing leaves your machine. This is the 95% case: "what did I miss just now."
 
-### 🧠 What you missed (Engram, opt-in)
+`rotpilot budget 10m` hands rotpilot a daily rot ration (or `1h --weekly`). `rotpilot stats` then shows a **live meter** — `today ███████░░░ 7m / 10m · 3m left` — plus a days-under-budget streak, and the recap roast knows when you've blown past it ("*you burned through your 10-minute budget by 9am*"). `rotpilot budget off` to drop it.
 
-"…wait, what question?" — that's what this answers. rotpilot's whole job is making you **not watch** while Claude works; [Engram](https://docs.weaviate.io/engram) is the compensation: it remembers what you missed.
+### 🧠 Across time & repos (Engram, opt-in)
+
+Recap works locally out of the box (above). A single local transcript can't do two things, though: remember a session after it's gone, and answer a *question* across repos. If you want those, you can **optionally** connect [Engram](https://docs.weaviate.io/engram), an external memory service. It's off by default and entirely opt-in — rotpilot works fully without it.
 
 With your explicit opt-in, the transcript slice from each rot window is sent to **your own** Engram project as a conversation, and its extraction pipeline splits it into exactly two memories: what still **needs you** (`loose_ends`: questions asked into the void, approvals it waited on, warnings you scrolled past) and what Claude **did** (`claude_work`: the receipts). The did-vs-needs-you split is made by the pipeline reading the dialogue — rotpilot parses nothing.
 
-For setting up Engram, read [Engram Quickstart](./docs/engram-quickstart.md). Once you setup the project correctly and have a key, run:
+For setting up Engram, read [Engram Quickstart](./docs/engram-quickstart.md). Once the project's wired up and you have a key:
 
 ```
-rotpilot recap                          # this repo: a sardonic briefing of what you missed
+rotpilot recap --all                    # this repo, across every past session — not just this one
 rotpilot recap "what changed in auth?"  # ask anything, across every project you ever rotted through
 ```
 

@@ -47,19 +47,33 @@ export function metricRow(label: string, value: string, note = ''): string {
   return `  ${dim(label.padEnd(20))}${bold(value.padEnd(9))}${note ? '  ' + dim(note) : ''}`;
 }
 
-interface Bar {
-  label: string;
-  value: number;
-  display: string;
+/** A single progress bar for a budget: lime fill up to the limit, red past it,
+ * dim track for the remainder. `frac` is used/limit (can exceed 1). */
+export function progressBar(frac: number, width = 16): string {
+  const filled = Math.min(width, Math.round(Math.min(1, Math.max(0, frac)) * width));
+  const over = frac > 1 ? Math.min(width - filled, Math.max(1, Math.round((frac - 1) * width))) : 0;
+  const rest = Math.max(0, width - filled - over);
+  return brand('█'.repeat(filled)) + red('█'.repeat(over)) + dim('░'.repeat(rest));
 }
 
-/** A horizontal bar block: lime fill on a dim track, dim label + value. */
-export function bars(rows: Bar[], width = 18): string[] {
-  const max = Math.max(1, ...rows.map((r) => r.value));
-  return rows.map((r) => {
-    const n = max > 0 ? Math.round((r.value / max) * width) : 0;
-    return `  ${dim(r.label.padEnd(4))}${brand('█'.repeat(n))}${dim('░'.repeat(width - n))} ${dim(r.display)}`;
-  });
+// heatmap: a GitHub-contributions grid, but for rot. Five intensities — a dim
+// track dot for a clean day, then lime brightening with the damage. Truecolor
+// when we have it; density glyphs when we don't, so the grid survives NO_COLOR.
+const HEAT_RGB: [number, number, number][] = [
+  [74, 105, 24],
+  [106, 150, 34],
+  [135, 190, 44],
+  [163, 230, 53],
+];
+const HEAT_MONO = ['·', '░', '▒', '▓', '█'];
+
+/** One heatmap cell for an intensity `level` 0–4 (0 = no rot that day). */
+export function heatCell(level: number): string {
+  const l = Math.max(0, Math.min(4, Math.round(level)));
+  if (!colorOn) return HEAT_MONO[l];
+  if (l === 0) return dim('·');
+  const [r, g, b] = HEAT_RGB[l - 1];
+  return `\x1b[38;2;${r};${g};${b}m█\x1b[0m`;
 }
 
 /** A dim inline breakdown line: "done: 23  ·  idle: 3". */
