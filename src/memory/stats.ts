@@ -1,7 +1,7 @@
 /** `rotpilot stats` — the screenshot-worthy vanity report, in a framed card. */
 import { readEvents, readVows, type BreakEvent } from './store.js';
 import { loadConfig } from '../config.js';
-import { bold, dim, brand, yellow, green, box, masthead } from '../ui.js';
+import { dim, masthead, card, metricRow, bars, meta, type CardSection } from '../ui.js';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -11,17 +11,16 @@ function fmt(sec: number): string {
   return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
 }
 
-function bar(v: number, max: number, width = 18): string {
-  const n = max > 0 ? Math.round((v / max) * width) : 0;
-  return '█'.repeat(n) + '░'.repeat(width - n);
-}
-
 export async function printStats(): Promise<void> {
   const events = readEvents();
   if (events.length === 0) {
     masthead();
     console.log('');
-    console.log(box('no rot recorded yet.\nrun claude, let it cook, rot responsibly.', 'stats'));
+    console.log(
+      card('stats', [
+        { body: [dim('  no rot recorded yet.'), dim('  run claude, let it cook, rot responsibly.')] },
+      ]),
+    );
     console.log('');
     return;
   }
@@ -37,7 +36,6 @@ export async function printStats(): Promise<void> {
     const d = new Date(e.ts).getDay();
     byDay.set(d, (byDay.get(d) ?? 0) + e.rotSeconds);
   }
-  const maxDay = Math.max(1, ...byDay.values());
 
   const perms = events.filter((e) => e.reason === 'permission' && e.responseLatencyMs != null);
   const fastest = perms.length ? Math.min(...perms.map((e) => e.responseLatencyMs!)) : null;
@@ -47,57 +45,54 @@ export async function printStats(): Promise<void> {
   const reasons = new Map<string, number>();
   for (const e of events) reasons.set(e.reason, (reasons.get(e.reason) ?? 0) + 1);
 
-  // one metric row: plain label + colored value, both in fixed columns so the
-  // dim note column lines up regardless of value length (pad BEFORE coloring)
-  const row = (k: string, v: string, color: (s: string) => string, note: string) =>
-    `${dim(k.padEnd(20))}${color(v.padEnd(9))}  ${dim(note)}`;
+  const sections: CardSection[] = [];
 
-  const lines: string[] = [];
-  lines.push(row('rot this week', fmt(total(week)), brand, `${week.length} breaks`));
-  lines.push(row('rot all time', fmt(total(events)), bold, `${events.length} breaks`));
-  lines.push(
-    row('longest single rot', fmt(longest.rotSeconds), (s) => bold(yellow(s)), `${longest.feed}${longest.repo ? ', fixing ' + longest.repo : ''}`),
-  );
-  lines.push(row('rot ratio', ratio.toFixed(2), bold, 'sec rotted per sec claude worked'));
+  // headline metrics (no sub-heading — they sit right under the card title)
+  const top = [
+    metricRow('rot this week', fmt(total(week)), `${week.length} breaks`),
+    metricRow('rot all time', fmt(total(events)), `${events.length} breaks`),
+    metricRow('longest single rot', fmt(longest.rotSeconds), `${longest.feed}${longest.repo ? ' · fixing ' + longest.repo : ''}`),
+    metricRow('rot ratio', ratio.toFixed(2), 'sec rotted per sec claude worked'),
+  ];
   if (fastest != null) {
-    lines.push(row('fastest snap-back', `${(fastest / 1000).toFixed(1)}s`, bold, 'reel → permission prompt'));
+    top.push(metricRow('fastest snap-back', `${(fastest / 1000).toFixed(1)}s`, 'reel → permission prompt'));
   }
+  sections.push({ body: top });
 
-  lines.push('');
-  lines.push(dim('rot by weekday (last 7 days)'));
-  for (let d = 0; d < 7; d++) {
-    const v = byDay.get(d) ?? 0;
-    lines.push(`  ${dim(DAYS[d])}  ${brand(bar(v, maxDay))} ${dim(fmt(v))}`);
-  }
+  sections.push({
+    heading: 'rot by weekday · last 7 days',
+    body: bars(DAYS.map((label, d) => ({ label, value: byDay.get(d) ?? 0, display: fmt(byDay.get(d) ?? 0) }))),
+  });
 
-  lines.push('');
-  const parts = [...reasons.entries()].map(([r, n]) => `${r}: ${n}`).join('  ·  ');
-  lines.push(dim(`snapped back by — ${parts}`));
+  sections.push({
+    heading: 'snapped back by',
+    body: [meta([...reasons.entries()].map(([r, n]) => `${r}: ${n}`))],
+  });
 
   const vows = readVows();
-  lines.push('');
-  lines.push(bold(yellow('🔥 rotpilot remembers')));
+  const vowBody: string[] = [];
   if (!vows.length) {
-    lines.push(dim('· nothing vowed yet — put a promise on record:'));
-    lines.push(dim('  rotpilot vow "10 minutes a day, max"'));
+    vowBody.push(dim('  nothing vowed yet — put a promise on record:'));
+    vowBody.push(dim('  rotpilot vow "10 minutes a day, max"'));
   }
   for (const v of vows) {
-    lines.push(`${green('·')} "${v.text}" ${dim(`(vowed ${v.ts.slice(0, 10)})`)}`);
+    vowBody.push(`  ${dim('·')} "${v.text}" ${dim(`(vowed ${v.ts.slice(0, 10)})`)}`);
     const since = Date.parse(v.ts);
     const evs = events.filter((e) => Date.parse(e.ts) >= since);
-    lines.push(
+    vowBody.push(
       evs.length
-        ? dim(`  receipts: ${fmt(total(evs))} of rot across ${evs.length} break${evs.length === 1 ? '' : 's'} since then`)
-        : dim('  receipts: clean since then. for now.'),
+        ? dim(`    receipts: ${fmt(total(evs))} of rot across ${evs.length} break${evs.length === 1 ? '' : 's'} since then`)
+        : dim('    receipts: clean since then. for now.'),
     );
   }
+  sections.push({ heading: 'rotpilot remembers', body: vowBody });
+
   if (loadConfig().engram.shareTranscripts) {
-    lines.push('');
-    lines.push(dim("and everything claude did while you weren't looking: rotpilot recap"));
+    sections.push({ body: [dim("  everything claude did while you weren't looking: rotpilot recap")] });
   }
 
   masthead();
   console.log('');
-  console.log(box(lines.join('\n'), 'the damage'));
+  console.log(card('the damage', sections));
   console.log('');
 }

@@ -61,8 +61,11 @@ function emptyMcpConfig(): string {
   return p;
 }
 
-/** Run Haiku headless on `prompt`, prompt via stdin. null on any trouble. */
-function runClaude(prompt: string, timeoutMs = 30000): Promise<string | null> {
+/** Run Haiku headless on `prompt`, prompt via stdin. null on any trouble.
+ * The full recap prompt takes ~10-17s idle, but spikes well past 30s when the
+ * session is busy (daemon capturing frames + Chrome running) — which is exactly
+ * when recap runs — so give it generous headroom before falling back. */
+function runClaude(prompt: string, timeoutMs = 60000): Promise<string | null> {
   return new Promise((resolve) => {
     let proc;
     try {

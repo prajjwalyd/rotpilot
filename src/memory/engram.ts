@@ -87,9 +87,11 @@ export function engramEnabled(): boolean {
 }
 
 /** The topic design `rotpilot engram` asks you to create with the project.
- * Topics are console-only and fixed at project creation; rotpilot targets
- * these names and scopes exactly. Both unbounded, both user + property
- * "project" — one scope choice, two descriptions, done. */
+ * The topic SET — names, scope, bounded-ness — is fixed at project creation and
+ * rotpilot targets these names/scopes exactly; the DESCRIPTIONS (the extraction
+ * prompts) can be refined later in the console without recreating the project.
+ * Both unbounded, both user + property "project" — one scope choice, two
+ * descriptions, done. */
 export const TOPIC_DESIGN = [
   {
     name: 'loose_ends',

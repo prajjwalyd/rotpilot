@@ -3,6 +3,7 @@
  * hook client stays as fast as possible.
  */
 export {};
+import type { CardSection } from './ui.js'; // type-only: erased at runtime, keeps the fast path lean
 
 const fast = process.argv[2];
 
@@ -124,34 +125,35 @@ async function mainCli(): Promise<void> {
         if (status === 'present') console.log(ui.ok('brainrot loop ready'));
         else if (status === 'downloaded') console.log(ui.ok('brainrot loop downloaded'));
         else if (status === 'no-ytdlp')
-          console.log('•  yt-dlp not found — install it (`brew install yt-dlp`) and rerun init for the\n   subway surfers loop; until then localLoop plays the built-in animation');
-        else console.log('•  loop download failed (network?) — localLoop plays the built-in animation for now');
+          console.log(ui.warn('yt-dlp not found — `brew install yt-dlp`, then rerun init for the subway-surfers loop; until then localLoop plays the built-in animation'));
+        else console.log(ui.warn('loop download failed (network?) — localLoop plays the built-in animation for now'));
       }
       installHooks(process.cwd());
       console.log(ui.ok(`rotpilot ON for ${process.cwd()}`));
-      console.log('  hooks written to ./.claude/settings.local.json (this project only, not global).');
+      console.log(ui.note('hooks in ./.claude/settings.local.json — this project only, never global'));
       const inTerm = process.env.KITTY_LISTEN_ON || process.env.TERM_PROGRAM === 'ghostty';
       if (!inTerm) {
         console.log('');
-        console.log(ui.warn('you are not in a supported terminal — nothing will play here.'));
-        console.log('   rotpilot is terminal-only (never the desktop app or VS Code). run claude in:');
-        console.log('   · ghostty ≥1.3 — works out of the box');
-        console.log('   · kitty — needs two lines in ~/.config/kitty/kitty.conf (then restart kitty):');
-        console.log('       allow_remote_control socket-only');
-        console.log('       listen_on unix:/tmp/kitty');
+        console.log(ui.warn('not a supported terminal — nothing will play here.'));
+        console.log(ui.bullet('rotpilot is terminal-only (never the desktop app or VS Code)'));
+        console.log(ui.bullet('ghostty ≥1.3 — works out of the box'));
+        console.log(ui.bullet('kitty — add two lines to ~/.config/kitty/kitty.conf, then restart:'));
+        console.log(`      ${ui.dim('allow_remote_control socket-only')}`);
+        console.log(`      ${ui.dim('listen_on unix:/tmp/kitty')}`);
       }
       console.log('');
-      console.log('next steps:');
-      console.log('  0. enable rotpilot in OTHER projects with `rotpilot on` (run it in that dir)');
-      console.log('  1. RESTART any running claude sessions (hooks load at session start)');
-      console.log('  2. run claude code in kitty or ghostty, in this project, and give it something chunky');
-      console.log('  3. rot. it will yank the feed away when claude needs you.');
-      console.log('  4. rotpilot stats   — see the damage');
+      console.log(ui.heading('next steps'));
       console.log('');
-      console.log('escape hatches: press q inside the tv · `rotpilot off` · `rotpilot stop`');
+      console.log(ui.step(1, 'RESTART any running claude sessions (hooks load at session start)'));
+      console.log(ui.step(2, 'run claude in kitty or ghostty, in this project, on something chunky'));
+      console.log(ui.step(3, 'rot — it yanks the feed away when claude needs you'));
+      console.log(ui.step(4, `${ui.bold('rotpilot stats')} — see the damage`));
       console.log('');
-      console.log('feeds: localLoop (default, safe) | shorts | instagram (opt-in, at your own risk)');
-      console.log('switch: rotpilot feed <name>');
+      console.log(ui.tip('enable in other projects —', 'rotpilot on'));
+      console.log(ui.tip('switch feeds —', 'rotpilot feed <name>'));
+      console.log(ui.tip('escape hatches —', 'q in the tv · rotpilot off · rotpilot stop'));
+      console.log('');
+      console.log(ui.note('feeds: localLoop (default, safe) · shorts · instagram (opt-in, at your own risk)'));
     });
 
   program
@@ -178,7 +180,7 @@ async function mainCli(): Promise<void> {
       const dir = process.cwd();
       const on = hooksInstalled(dir);
       const lines: string[] = [];
-      const row = (k: string, v: string) => lines.push(`${ui.dim(k.padEnd(9))} ${v}`);
+      const row = (k: string, v: string) => lines.push(`  ${ui.dim(k.padEnd(9))} ${v}`);
       row('rotpilot', on ? ui.green('ON for this project') : ui.dim('off here (`rotpilot on` to enable)'));
       const termName = process.env.KITTY_LISTEN_ON
         ? ui.green('kitty (remote control ✓)')
@@ -199,7 +201,7 @@ async function mainCli(): Promise<void> {
         }
       }
       console.log('');
-      console.log(ui.box(lines.join('\n'), `status · ${path.basename(dir)}`));
+      console.log(ui.card(`status · ${path.basename(dir)}`, [{ body: lines }]));
       console.log('');
     });
 
@@ -276,7 +278,7 @@ async function mainCli(): Promise<void> {
         }
         saveApiKey(key);
         console.log(ui.ok('key saved to ~/.config/rotpilot/engram.key (mode 600, survives any shell)'));
-        console.log('  verify the pipe: rotpilot engram check');
+        console.log(ui.tip('verify the pipe —', 'rotpilot engram check'));
         return;
       }
 
@@ -309,34 +311,39 @@ async function mainCli(): Promise<void> {
 
       if (action !== 'check') {
         console.log('');
-        console.log('  rotpilot × engram — the "what you missed" memory (optional)');
-        console.log('  ────────────────────────────────────────────────────────────');
-        console.log('  rotpilot exists to make you NOT watch while claude works. engram remembers');
-        console.log('  what you missed: each rot window\'s slice of the session transcript is split');
-        console.log('  into what claude DID and what still NEEDS YOU. `rotpilot recap` gets it back');
-        console.log('  — even weeks later, even across projects ("did we ever touch stripe?").');
+        console.log(ui.heading('rotpilot × engram — the "what you missed" memory'));
         console.log('');
-        console.log('  1. create an Engram project at https://console.weaviate.cloud');
-        console.log('     topics are FIXED at project creation — define exactly TWO in the default');
-        console.log('     group, both "User + property scoped" (property name: project), both UNBOUNDED:');
+        console.log(
+          ui.wrapText(
+            "rotpilot exists to make you NOT watch while claude works. engram remembers what you missed: each rot window's slice of the session transcript, split into what claude DID and what still NEEDS YOU. `rotpilot recap` gets it back — even weeks later, even across projects.",
+          ),
+        );
+        console.log('');
+        console.log(ui.step(1, 'create an Engram project at https://console.weaviate.cloud'));
+        console.log(ui.dim('       the topic SET is fixed at creation — define exactly TWO in the'));
+        console.log(ui.dim('       default group, both "User + property scoped" (property: project),'));
+        console.log(ui.dim('       both UNBOUNDED:'));
         console.log('');
         for (const t of TOPIC_DESIGN) {
-          console.log(`     ${t.name}`);
-          console.log(`       "${t.description}"`);
+          console.log(`       ${ui.brand(t.name)}`);
+          console.log(ui.wrapText(t.description, '         ', 64));
         }
         console.log('');
-        console.log('     (names, the "project" property, and the descriptions matter — the');
-        console.log('      descriptions are the extraction prompts.)');
-        console.log('  2. create an API key in the console (shown once!) and save it:');
-        console.log('       rotpilot engram key        # hidden prompt, stored 0600 in ~/.config/rotpilot');
-        console.log('       (the ENGRAM_API_KEY env var also works and takes precedence)');
-        console.log('  3. opt in to the transcript memory (explicit — session content leaves the machine):');
-        console.log('       rotpilot engram transcripts on');
-        console.log('  4. verify the pipe end-to-end:');
-        console.log('       rotpilot engram check');
+        console.log(ui.dim('       (the descriptions are the extraction prompts — editable later)'));
+        console.log('');
+        console.log(ui.step(2, 'save an API key (created in the console, shown once):'));
+        console.log(`       ${ui.bold('rotpilot engram key')}   ${ui.dim('# hidden prompt, 0600 · or ENGRAM_API_KEY env var')}`);
+        console.log('');
+        console.log(ui.step(3, 'opt in to the transcript memory (session content leaves the machine):'));
+        console.log(`       ${ui.bold('rotpilot engram transcripts on')}`);
+        console.log('');
+        console.log(ui.step(4, 'verify the pipe end-to-end:'));
+        console.log(`       ${ui.bold('rotpilot engram check')}`);
         console.log('');
         const cfgNow = loadConfig();
-        console.log(`  status: key ${engramEnabled() ? '✓' : ui.no('(`rotpilot engram key`)')} · transcripts ${cfgNow.engram.shareTranscripts ? ui.ok('on') : ui.no('off (`rotpilot engram transcripts on`)')}`);
+        console.log(
+          `  ${ui.dim('status:')}  key ${engramEnabled() ? ui.ok('saved') : ui.no('missing')}   transcripts ${cfgNow.engram.shareTranscripts ? ui.ok('on') : ui.no('off')}`,
+        );
         return;
       }
 
@@ -408,7 +415,7 @@ async function mainCli(): Promise<void> {
       const text = words.join(' ');
       addVow(text);
       console.log(ui.ok(`on the record: "${text}"`));
-      console.log('  rotpilot never forgets. `rotpilot stats` will bring receipts.');
+      console.log(ui.tip('rotpilot never forgets — receipts in', 'rotpilot stats'));
     });
 
   program
@@ -442,8 +449,8 @@ async function mainCli(): Promise<void> {
             const t = line.trim();
             if (!t) return '';
             const m = t.match(LABEL);
-            if (m) return ui.brand(m[1].toLowerCase());
-            return ui.wrapText(line, '', 68);
+            if (m) return ui.heading(m[1].toLowerCase());
+            return ui.wrapText(line, '  ', 68);
           })
           .join('\n');
       // `--raw`: dump the exact prompt (voice + rot stats + fragments) sent to
@@ -470,16 +477,18 @@ async function mainCli(): Promise<void> {
         stop();
         if (!r?.memories?.length) {
           console.log('');
-          console.log(ui.box(ui.dim('engram has nothing on that (yet). rot more, ask again.'), `recap · "${q}"`));
+          console.log(
+            ui.card(`recap · "${q}"`, [{ body: [ui.dim('  engram has nothing on that (yet). rot more, ask again.')] }]),
+          );
           console.log('');
           return;
         }
         if (opts.raw) return printRaw(answerPrompt(q, r.memories, ctx), 'answer', r.memories.length);
-        const body = synth
-          ? fmtSynth(synth)
-          : r.memories.map((m) => ui.wrapText('• ' + clean(m.content), '', 68)).join('\n');
+        const bodyLines = synth
+          ? fmtSynth(synth).split('\n')
+          : r.memories.map((m) => ui.wrapText('• ' + clean(m.content), '  ', 68));
         console.log('');
-        console.log(ui.box(body, `while you were rotting · "${q}"`));
+        console.log(ui.card(`while you were rotting · "${q}"`, [{ body: bodyLines }]));
         console.log('');
         return;
       }
@@ -508,30 +517,28 @@ async function mainCli(): Promise<void> {
           ? `nothing on record for ${project} yet.\nrot a little; extraction runs async (queue can lag a few minutes).`
           : `nothing on record for ${project} yet.\nthe transcript memory is OFF — turn it on with:\nrotpilot engram transcripts on`;
         console.log('');
-        console.log(ui.box(ui.dim(msg), `recap · ${project}`));
+        console.log(ui.card(`recap · ${project}`, [{ body: msg.split('\n').map((l) => ui.dim('  ' + l)) }]));
         console.log('');
         return;
       }
-      let body: string;
+      let sections: CardSection[];
       if (synth) {
-        body = fmtSynth(synth);
+        // synth is one blob; its embedded "claude handled"/"your move" headers
+        // are already turned into ▎ headings by fmtSynth
+        sections = [{ body: fmtSynth(synth).split('\n') }];
       } else {
-        // fallback: de-noised raw list, still split by section
-        const parts: string[] = [];
-        if (recap.looseEnds.length) {
-          parts.push(ui.brand('your move'));
-          for (const m of recap.looseEnds) parts.push(ui.wrapText('• ' + clean(m.content), '', 68));
-        }
-        if (recap.work.length) {
-          if (parts.length) parts.push('');
-          parts.push(ui.brand('claude handled'));
-          for (const m of recap.work) parts.push(ui.wrapText('• ' + clean(m.content), '', 68));
-        }
-        body = parts.join('\n');
+        // fallback: de-noised raw list as proper ▎ sections, same order as the
+        // synth shape (what got done, then what's left) so both modes read alike
+        sections = [];
+        if (recap.work.length)
+          sections.push({ heading: 'claude handled', body: recap.work.map((m) => ui.wrapText('• ' + clean(m.content), '  ', 68)) });
+        if (recap.looseEnds.length)
+          sections.push({ heading: 'your move', body: recap.looseEnds.map((m) => ui.wrapText('• ' + clean(m.content), '  ', 68)) });
       }
       console.log('');
-      console.log(ui.box(body, `recap · ${project}`));
-      console.log(`  ${ui.note('ask anything: rotpilot recap "what was the image bug?"')}`);
+      console.log(ui.card(`recap · ${project}`, sections));
+      console.log('');
+      console.log(ui.tip('ask anything —', 'rotpilot recap "what was the image bug?"'));
       console.log('');
     });
 

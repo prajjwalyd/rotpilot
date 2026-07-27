@@ -361,7 +361,7 @@ export class ChromeSession {
 
 /** Dispatch a key press (used by feeds to advance to the next short/reel). */
 export async function pressKey(client: CDP.Client, key: 'ArrowDown'): Promise<void> {
-  const info = { key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40 };
+  const info = { key, code: key, windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40 };
   await client.Input.dispatchKeyEvent({ type: 'rawKeyDown', ...info });
   await new Promise((r) => setTimeout(r, 40 + Math.random() * 80));
   await client.Input.dispatchKeyEvent({ type: 'keyUp', ...info });
