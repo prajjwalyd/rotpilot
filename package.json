@@ -1,0 +1,59 @@
+{
+  "name": "rotpilot",
+  "version": "0.1.0",
+  "description": "Claude Code feeds you brainrot while it works and yanks it away the second it needs anything from you.",
+  "author": "Prajjwal Yadav <prajjwalyd@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/prajjwalyd/rotpilot.git"
+  },
+  "homepage": "https://github.com/prajjwalyd/rotpilot#readme",
+  "bugs": {
+    "url": "https://github.com/prajjwalyd/rotpilot/issues"
+  },
+  "type": "module",
+  "bin": {
+    "rotpilot": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "prepublishOnly": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "claude-code",
+    "brainrot",
+    "kitty",
+    "terminal",
+    "reels",
+    "shorts",
+    "ghostty",
+    "doomscroll",
+    "engram"
+  ],
+  "dependencies": {
+    "chrome-remote-interface": "^0.33.3",
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/chrome-remote-interface": "^0.31.14",
+    "@types/node": "^22.10.0",
+    "boxen": "^8.0.1",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2"
+  }
+}

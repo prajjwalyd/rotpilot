@@ -1,0 +1,143 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>rotpilot loop</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  video, canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #hud { position: absolute; top: 16px; left: 0; right: 0; text-align: center;
+         font: 700 28px -apple-system, sans-serif; color: #fff;
+         text-shadow: 0 0 12px #f0f; z-index: 3; }
+</style>
+</head>
+<body>
+<video id="v" autoplay loop muted playsinline style="display:none"></video>
+<canvas id="c"></canvas>
+<div id="hud">0</div>
+<script>
+// If ?src=file://.../loop.mp4 is given and loads, use it; otherwise run the
+// built-in canvas "gameplay" loop. Safe default: no network, no accounts.
+const params = new URLSearchParams(location.search);
+const src = params.get('src');
+const video = document.getElementById('v');
+const canvas = document.getElementById('c');
+const hud = document.getElementById('hud');
+let useVideo = false;
+if (src) {
+  video.src = src;
+  video.addEventListener('canplay', () => {
+    useVideo = true;
+    video.style.display = 'block';
+    canvas.style.display = 'none';
+    hud.style.display = 'none';
+  });
+  video.addEventListener('error', () => { useVideo = false; });
+}
+
+// ---- canvas fake endless-runner ----
+const ctx = canvas.getContext('2d');
+function fit() { canvas.width = innerWidth; canvas.height = innerHeight; }
+addEventListener('resize', fit); fit();
+
+const LANES = 3;
+let t = 0, score = 0, lane = 1, targetLane = 1, laneX = 1;
+let obstacles = []; // {z, lane}
+let stars = Array.from({length: 90}, () => ({x: Math.random(), y: Math.random(), s: Math.random()*2+0.5}));
+let shake = 0;
+
+function laneCenter(l, z) {
+  const w = canvas.width, h = canvas.height;
+  const horizon = h * 0.35;
+  const spread = (0.14 + z * 0.6) * w;
+  return { x: w/2 + (l-1) * spread, y: horizon + z * (h - horizon) };
+}
+
+function step() {
+  t++;
+  score += 3 + (t % 7 === 0 ? 17 : 0);
+  hud.textContent = score.toLocaleString();
+
+  if (t % 55 === 0) obstacles.push({ z: 0, lane: Math.floor(Math.random()*LANES) });
+  for (const o of obstacles) o.z += 0.012 + Math.min(0.02, t/60000);
+  // auto-dodge: if an obstacle is close in our lane, move
+  const threat = obstacles.find(o => o.lane === targetLane && o.z > 0.55 && o.z < 0.85);
+  if (threat) {
+    const options = [0,1,2].filter(l => l !== targetLane && !obstacles.some(o => o.lane === l && o.z > 0.5));
+    if (options.length) targetLane = options[Math.floor(Math.random()*options.length)];
+  }
+  obstacles = obstacles.filter(o => o.z < 1.05);
+  laneX += (targetLane - laneX) * 0.18;
+  if (shake > 0) shake--;
+
+  const w = canvas.width, h = canvas.height;
+  const g = ctx.createLinearGradient(0, 0, 0, h);
+  const hue = (t/3) % 360;
+  g.addColorStop(0, `hsl(${hue}, 80%, 12%)`);
+  g.addColorStop(1, `hsl(${(hue+80)%360}, 90%, 25%)`);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+
+  // stars
+  ctx.fillStyle = 'rgba(255,255,255,.7)';
+  for (const s of stars) {
+    s.y += 0.004 * s.s;
+    if (s.y > 1) s.y = 0;
+    ctx.fillRect(s.x * w, s.y * h * 0.4, s.s, s.s);
+  }
+
+  const ox = shake ? (Math.random()-0.5)*8 : 0;
+  ctx.save();
+  ctx.translate(ox, 0);
+
+  // lane lines
+  ctx.strokeStyle = 'rgba(255,0,255,.5)';
+  ctx.lineWidth = 3;
+  for (let l = -0.5; l <= LANES - 0.5; l++) {
+    ctx.beginPath();
+    const a = laneCenter(l + 0.0, 0), b = laneCenter(l + 0.0, 1);
+    ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+  // horizon glow
+  ctx.fillStyle = `hsla(${(hue+180)%360}, 100%, 60%, .35)`;
+  ctx.fillRect(0, h*0.35 - 2, w, 4);
+
+  // obstacles
+  for (const o of obstacles.slice().sort((a,b) => a.z - b.z)) {
+    const p = laneCenter(o.lane, o.z);
+    const s = 14 + o.z * 90;
+    ctx.fillStyle = `hsl(${(hue+140)%360}, 95%, 55%)`;
+    ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 18;
+    ctx.fillRect(p.x - s/2, p.y - s, s, s);
+    ctx.shadowBlur = 0;
+  }
+
+  // player cube
+  const pp = laneCenter(laneX, 0.9);
+  const ps = 96;
+  const bounce = Math.abs(Math.sin(t/8)) * 14;
+  ctx.fillStyle = '#fff';
+  ctx.shadowColor = '#0ff'; ctx.shadowBlur = 30;
+  ctx.fillRect(pp.x - ps/2, pp.y - ps - bounce, ps, ps);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(pp.x - ps/4, pp.y - ps*0.72 - bounce, 12, 12);
+  ctx.fillRect(pp.x + ps/4 - 12, pp.y - ps*0.72 - bounce, 12, 12);
+
+  ctx.restore();
+
+  // occasional "W" flash, because engagement
+  if (t % 260 < 22) {
+    ctx.fillStyle = 'rgba(255,255,255,.9)';
+    ctx.font = `900 ${Math.floor(h/8)}px -apple-system, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText(['W','NO SHOT','COOKED','GOATED'][Math.floor(t/260) % 4], w/2, h*0.6);
+  }
+
+  if (!useVideo) requestAnimationFrame(step);
+}
+requestAnimationFrame(step);
+</script>
+</body>
+</html>
