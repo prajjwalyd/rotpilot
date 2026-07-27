@@ -1,0 +1,42 @@
+# Publishes to npm via trusted publishing (OIDC) — no NPM_TOKEN secret.
+# The trusted publisher on npmjs.com must name this file exactly: publish.yml
+name: publish
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for trusted publishing
+
+jobs:
+  publish:
+    # macOS, not ubuntu: package.json declares os: ["darwin"] and npm ci
+    # enforces that on the root package (EBADPLATFORM on linux).
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24' # ships npm 11.x; trusted publishing needs >= 11.5.1
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - name: Verify tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p 'require("./package.json").version')"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag v$tag does not match package.json $pkg"
+            exit 1
+          fi
+
+      # prepublishOnly runs tsup; provenance is automatic under OIDC.
+      - run: npm publish
