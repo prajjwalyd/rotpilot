@@ -1,6 +1,6 @@
 {
   "name": "rotpilot",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Claude Code feeds you brainrot while it works and yanks it away the second it needs anything from you.",
   "author": "Prajjwal Yadav <prajjwalyd@gmail.com>",
   "license": "MIT",
