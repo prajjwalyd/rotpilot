@@ -18,7 +18,8 @@
   },
   "files": [
     "dist",
-    "assets",
+    "assets/player.html",
+    "assets/sounds",
     "README.md",
     "LICENSE"
   ],

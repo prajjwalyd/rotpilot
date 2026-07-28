@@ -1,11 +1,11 @@
 /** `rotpilot stats` — the screenshot-worthy vanity report, in a framed card. */
 import { readEvents, type BreakEvent } from './store.js';
 import { loadConfig } from '../config.js';
-import { dim, bold, masthead, card, metricRow, meta, progressBar, heatCell, type CardSection } from '../ui.js';
-import { humanDuration, localMidnight, budgetUsage, dailyStreak } from './budget.js';
+import { dim, bold, masthead, card, metricRow, meta, progressBar, bars, tip, type CardSection } from '../ui.js';
+import { humanDuration, budgetUsage, dailyStreak } from './budget.js';
+import { engramEnabled } from './engram.js';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const DAYS_LONG = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const DAY_MS = 86_400_000;
 
 function fmt(sec: number): string {
@@ -40,38 +40,23 @@ function trendNote(events: BreakEvent[], now: number, thisWeek: number): string 
   return pct > 0 ? `↑ ${pct}% vs usual` : `↓ ${-pct}% vs usual`;
 }
 
-/** An 8-week rot heatmap (weekday rows × week columns) + a "hardest weekday"
- * read-out, replacing the old 7-bar chart with something worth screenshotting. */
-function heatmapSection(events: BreakEvent[], now: number): CardSection {
-  const WEEKS = 8;
-  const dayRot = new Map<number, number>();
-  for (const e of events) {
-    const k = localMidnight(Date.parse(e.ts));
-    dayRot.set(k, (dayRot.get(k) ?? 0) + e.rotSeconds);
+/** Rot per weekday across the trailing week — one bar a day, so you can see
+ * which day you lose. */
+function weekdaySection(week: BreakEvent[]): CardSection {
+  const byDay = new Map<number, number>();
+  for (const e of week) {
+    const d = new Date(e.ts).getDay();
+    byDay.set(d, (byDay.get(d) ?? 0) + e.rotSeconds);
   }
-  const today = localMidnight(now);
-  const gridStart = today - (new Date(today).getDay() + (WEEKS - 1) * 7) * DAY_MS; // Sunday, WEEKS-1 weeks back
-  const max = Math.max(1, ...[...dayRot.entries()].filter(([k]) => k >= gridStart).map(([, v]) => v));
-  const level = (sec: number): number => (sec <= 0 ? 0 : Math.min(4, Math.max(1, Math.ceil((sec / max) * 4))));
-
-  const rows: string[] = [];
-  const byWeekday = new Array(7).fill(0);
-  for (let wd = 0; wd < 7; wd++) {
-    const cells: string[] = [];
-    for (let wk = 0; wk < WEEKS; wk++) {
-      const day = gridStart + (wk * 7 + wd) * DAY_MS;
-      const sec = dayRot.get(day) ?? 0;
-      byWeekday[wd] += sec;
-      cells.push(day > today ? ' ' : heatCell(level(sec)));
-    }
-    rows.push(`  ${dim(DAYS[wd])} ${cells.join(' ')}`);
-  }
-
-  const hardest = byWeekday.indexOf(Math.max(...byWeekday));
-  const caption = byWeekday[hardest] > 0
-    ? `${WEEKS} weeks · you rot hardest on ${DAYS_LONG[hardest]}s`
-    : `${WEEKS} weeks · each cell one day`;
-  return { heading: 'the heatmap of shame', body: [...rows, '', meta([caption])] };
+  return {
+    heading: 'rot by weekday · last 7 days',
+    body: bars(
+      DAYS.map((label, d) => {
+        const sec = byDay.get(d) ?? 0;
+        return { label, value: sec, display: fmt(sec) };
+      }),
+    ),
+  };
 }
 
 /** The rot ration: a live meter for the current period + a days-under streak.
@@ -96,6 +81,29 @@ function budgetSection(events: BreakEvent[], now: number): CardSection {
   const streak = dailyStreak(budget, events, now);
   if (streak > 0) body.push(dim(`  ${streak}-day streak under ration`));
   return { heading: 'the ration', body };
+}
+
+/**
+ * Price the debt. Every question Claude asked while you were rotting lives in a
+ * per-session transcript that rotates — so the count is the only lasting trace,
+ * and the questions themselves are gone unless something kept them. That's the
+ * honest pitch for Engram, and the reason this section exists at all.
+ */
+function looseSection(week: BreakEvent[]): CardSection | null {
+  const asked = week.reduce((n, e) => n + (e.questions ?? 0), 0);
+  if (asked < 2) return null; // nothing worth nagging about
+  const on = engramEnabled(); // env var OR the saved key file — the normal path
+  return {
+    heading: 'loose ends',
+    body: on
+      ? [dim(`  claude asked you ${asked} things this week while you weren't looking.`), '', tip('the bill —', 'rotpilot loose')]
+      : [
+          dim(`  claude asked you ${asked} things this week while you weren't looking.`),
+          dim('  those sessions are gone, and took the questions with them.'),
+          '',
+          tip('keep them next time —', 'rotpilot engram'),
+        ],
+  };
 }
 
 export async function printStats(): Promise<void> {
@@ -139,13 +147,16 @@ export async function printStats(): Promise<void> {
   }
   sections.push({ body: top });
 
-  sections.push(heatmapSection(events, now));
-  sections.push({ heading: 'snapped back by', body: [meta([...reasons.entries()].map(([r, n]) => `${r}: ${n}`))] });
+  sections.push(weekdaySection(week));
+  // biggest offender first — insertion order is just whichever reason happened
+  // to land earliest, which reads as noise
+  sections.push({
+    heading: 'snapped back by',
+    body: [meta([...reasons.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${r}: ${n}`))],
+  });
   sections.push(budgetSection(events, now));
-
-  if (loadConfig().engram.shareTranscripts) {
-    sections.push({ body: [dim("  everything claude did while you weren't looking: rotpilot recap")] });
-  }
+  const loose = looseSection(week);
+  if (loose) sections.push(loose);
 
   masthead();
   console.log('');

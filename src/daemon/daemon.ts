@@ -15,6 +15,7 @@ import {
   focusKittyWindow,
   frontmostApp,
   activateApp,
+  isTerminalApp,
   launchKittyPanel,
   closeKittyPanel,
   findGhostty,
@@ -29,7 +30,7 @@ import { pngDims } from '../render/kitty.js';
 import { loadConfig, PID_PATH, KITTY_SOCK, ensureConfigDir } from '../config.js';
 import { appendEvent, patchLastLatency, repoLabel } from '../memory/store.js';
 import { sendRotWindow } from '../memory/engram.js';
-import { rotWindowMessages, missedLine } from '../memory/transcript.js';
+import { rotWindowMessages, missedLine, countQuestions } from '../memory/transcript.js';
 import { log } from '../log.js';
 
 interface TvState {
@@ -59,6 +60,12 @@ const JOKES: Record<string, string[]> = {
   idle: [
     "claude is waiting on YOU now. the roles reversed and it's embarrassing.",
     'your AI got bored waiting for you. even the machine has standards.',
+  ],
+  manual: [
+    'you paused it yourself. character growth, allegedly.',
+    'rot suspended by your own hand. weird flex, but noted.',
+    'self-control. disgusting. press r when it passes.',
+    'paused on purpose. the feed will wait. it always waits.',
   ],
   default: ['back to work. the rot waits. it always waits.'],
 };
@@ -114,6 +121,10 @@ export async function runDaemon(): Promise<void> {
   let gPanel: GhosttyPanel | null = null;
   // user pressed q in the TV: stay quiet until they submit the next prompt
   let snoozed = false;
+  // user pressed p: a HELD pause. Without this latch claude's next tool call
+  // would resume the feed a moment later and the key would do nothing. Released
+  // by r, by the next prompt (same contract as q), or by the session ending.
+  let manualPause = false;
   // gate frame forwarding so a snap-back freezes the TV instantly, before the
   // (slower) CDP stopScreencast round-trip completes
   let forwarding = false;
@@ -122,6 +133,11 @@ export async function runDaemon(): Promise<void> {
   let deepPauseTimer: NodeJS.Timeout | null = null;
   // auto-resume: no hook fires at permission approval, so resume after a timer
   let autoResumeTimer: NodeJS.Timeout | null = null;
+  // which snap-back put us in the current pause — resume refocuses differently
+  // for a permission (hand focus back) than for anything else (grab the TV)
+  let lastPauseReason: string | null = null;
+  // the app a permission snap-back interrupted, so we can return you to it
+  let returnFocusTo: string | null = null;
   // live subagents (SubagentStart/Stop). A Stop that arrives while a background
   // agent is still running is NOT "claude finished" — claude gets re-invoked
   // when the agent completes. Reset each turn so a missed SubagentStop can't
@@ -255,6 +271,34 @@ export async function runDaemon(): Promise<void> {
     } catch {}
   }
 
+  // Where focus belongs once the video is rolling again.
+  //
+  // A permission snap-back yanks you into the terminal mid-whatever, so resuming
+  // hands focus back to the app it interrupted — pressing y/n should return you
+  // where you were, not leave you parked in the terminal. Two guards: if you were
+  // already in the terminal there's nothing to hand back, and if you've since
+  // moved somewhere yourself we leave you there (otherwise the auto-resume timer
+  // drags the terminal in front of you a few seconds after you walked away,
+  // which is the same rudeness pointing the other way).
+  //
+  // Every other resume still grabs the TV — that focus steal IS the attention
+  // grab, and `q` needs the panel focused to work.
+  async function refocusAfterResume(): Promise<void> {
+    // consume both up front, so a failure below can't leave them set for the
+    // next cycle
+    const reason = lastPauseReason;
+    const target = returnFocusTo;
+    lastPauseReason = null;
+    returnFocusTo = null;
+    if (reason !== 'permission') {
+      await focusTv();
+      return;
+    }
+    if (!target) return; // you were already in the terminal — leave it alone
+    const cur = await frontmostApp();
+    if (cur && isTerminalApp(cur)) await activateApp(target);
+  }
+
   // COLD start: full setup, then play.
   async function enterPlaying(ctx: HookCtx): Promise<void> {
     log('enter PLAYING', ctx);
@@ -307,7 +351,7 @@ export async function runDaemon(): Promise<void> {
         chrome.resumeScroll();
         playStartedAt = playStartedAt || Date.now();
       }
-      await focusTv();
+      await refocusAfterResume();
       log('RESUME (deep=' + deepPaused + ')');
     } catch (e) {
       log('resume failed', e as Error);
@@ -318,6 +362,7 @@ export async function runDaemon(): Promise<void> {
   function pausePlaying(info: ExitInfo): void {
     log('PAUSE', info.reason);
     lastSnapbackAt = Date.now();
+    lastPauseReason = info.reason;
     forwarding = false; // freeze the TV immediately
     // permission pauses get a visible countdown + auto-resume (no approval hook
     // exists); a real work signal still resumes sooner if it arrives.
@@ -328,15 +373,21 @@ export async function runDaemon(): Promise<void> {
     // with no Engram anything
     const missed = missedLine(rotWindowMessages(info.ctx.transcriptPath, info.rotSeconds));
     if (missed) log('missed:', missed);
-    if (tv && !tv.sock.destroyed) send(tv.sock, { t: 'paused', msg: pickJoke(info.reason), countdownSec, missed });
+    const manual = info.reason === 'manual';
+    if (tv && !tv.sock.destroyed) {
+      send(tv.sock, { t: 'paused', msg: pickJoke(info.reason), countdownSec, missed, manual });
+    }
     chrome.softPause(); // stop advancing reels, but keep the pipeline warm
-    snapBackSideEffects(info);
+    // A pause you asked for gets no ding and no focus grab — there's nothing to
+    // alert you to, and yanking focus to claude would take it off the panel,
+    // which is the only place `r` can be typed.
+    if (!manual) snapBackSideEffects(info);
     recordBreak(info);
     clearAutoResume();
     if (countdownSec > 0) {
       autoResumeTimer = setTimeout(() => {
         log('auto-resume after countdown');
-        sm.onEvent('work-start', {});
+        sm.resumeNow();
       }, countdownSec * 1000);
       autoResumeTimer.unref?.();
     }
@@ -393,6 +444,8 @@ export async function runDaemon(): Promise<void> {
   async function stopPlaying(info: ExitInfo): Promise<void> {
     log('STOP', info.reason);
     lastSnapbackAt = Date.now();
+    lastPauseReason = null;
+    returnFocusTo = null;
     forwarding = false;
     clearDeepPause();
     clearAutoResume();
@@ -410,11 +463,27 @@ export async function runDaemon(): Promise<void> {
     }
   }
 
+  // The cue has to land in SILENCE. A reel at full volume masks a short wav, so
+  // the snap-back sound only ever seemed to work when nothing was playing — you
+  // heard it when the feed was already paused and never while watching. Mute
+  // first, then play. Bounded: a wedged Chrome must not swallow the cue.
+  async function playSnapbackCue(): Promise<void> {
+    await Promise.race([chrome.silence(), new Promise((r) => setTimeout(r, 400))]);
+    execFile('afplay', [path.join(assetsDir(), 'sounds', 'snapback.wav')], () => {});
+  }
+
   function snapBackSideEffects(info: ExitInfo): void {
-    if (loadConfig().sound) {
-      execFile('afplay', [path.join(assetsDir(), 'sounds', 'snapback.wav')], () => {});
-    }
+    // deliberately NOT awaited alongside the focus grab below — the focus snap is
+    // the part that gets your attention and must not queue behind a CDP call
+    if (loadConfig().sound) void playSnapbackCue();
     void (async () => {
+      // Read the frontmost app BEFORE we steal focus — this is the only moment
+      // it still says where you actually were. Something already in the terminal
+      // has nothing to hand back, so it stays null.
+      if (info.reason === 'permission') {
+        const before = await frontmostApp();
+        returnFocusTo = before && !isTerminalApp(before) ? before : null;
+      }
       let focused = false;
       if (gPanel?.claudeId) {
         // ghostty: focus the exact pane claude was in when the panel opened
@@ -430,6 +499,9 @@ export async function runDaemon(): Promise<void> {
     // joke refreshes and never-played snap-backs carry no rot window — not a break
     if (info.rotSeconds <= 0) return;
     const feed = loadConfig().feed;
+    // count what claude asked while you were gone; the transcript that holds it
+    // rotates with the session, so this tally is the only lasting trace
+    const questions = countQuestions(rotWindowMessages(info.ctx.transcriptPath, info.rotSeconds));
     appendEvent({
       ts: new Date().toISOString(),
       sessionId: info.ctx.sessionId,
@@ -439,6 +511,7 @@ export async function runDaemon(): Promise<void> {
       workSeconds: info.workSeconds,
       rotSeconds: info.rotSeconds,
       responseLatencyMs: null,
+      questions,
     });
     // the opt-in "what you missed" memory: ship the transcript segment that
     // streamed by during this rot window (gated inside on key + consent)
@@ -469,6 +542,7 @@ export async function runDaemon(): Promise<void> {
     { enter: enterPlaying, resume: resumePlaying, pause: pausePlaying, stop: stopPlaying },
     250, // cold-start debounce — snappy, still filters sub-250ms one-shot calls
     100, // resume debounce — near-instant
+    600, // prompt-start debounce — rides over turns answered in a blink
   );
 
   // watchdog: if claude vanished mid-rot (killed, crashed, -p exited), no hook
@@ -497,6 +571,7 @@ export async function runDaemon(): Promise<void> {
         }
         if (event === 'prompt') {
           snoozed = false; // new prompt re-arms after a user q
+          manualPause = false; // …and releases a held p, same contract
           activeSubagents = 0; // fresh turn — clear any leaked agent count
         }
         // prewarm chrome on any pre-work signal so the first play is warm
@@ -505,6 +580,7 @@ export async function runDaemon(): Promise<void> {
         }
         if (event === 'session-start') {
           snoozed = false; // NEW session = clean slate; a q from a past session must not mute startup
+          manualPause = false;
           activeSubagents = 0;
           void openIdlePanel(ctx); // show the greeting panel from the start
           break; // no state change — the state machine only drives playback
@@ -533,7 +609,9 @@ export async function runDaemon(): Promise<void> {
           void chrome.teardown();
           break;
         }
-        if (event === 'work-start' && snoozed) break;
+        // a held p outranks claude getting back to work — otherwise the very
+        // next tool call would undo the pause a beat after you asked for it
+        if (event === 'work-start' && (snoozed || manualPause)) break;
         sm.onEvent(event, ctx);
         break;
       }
@@ -553,8 +631,25 @@ export async function runDaemon(): Promise<void> {
         });
         break;
       }
+      case 'scroll': // arrow keys in the TV panel — drive the feed by hand
+        // only while the feed is actually showing: arrows on a pause screen or a
+        // greeting have nothing to scroll
+        if (sm.state === 'playing' && (msg.dir === 'up' || msg.dir === 'down')) {
+          void chrome.step(msg.dir as 'up' | 'down');
+        }
+        break;
+      case 'user-pause': // p pressed in the TV — same resident pause as a permission
+        if (sm.state === 'idle') break;
+        manualPause = true;
+        sm.onEvent('snap-back', { reason: 'manual' });
+        break;
+      case 'user-resume': // r pressed in the TV
+        manualPause = false;
+        if (sm.state === 'paused') sm.resumeNow();
+        break;
       case 'user-stop': // q pressed in the TV, or `rotpilot off`
         snoozed = true;
+        manualPause = false;
         if (sm.state === 'idle') {
           // q on the greeting panel (never played): close it AND kill Chrome so
           // nothing lingers in the background

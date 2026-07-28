@@ -31,7 +31,7 @@ npm install -g rotpilot
 rotpilot init
 ```
 
-Then run Claude Code **in kitty or Ghostty**, give it something chunky to do, and rot. That's it — the daemon boots itself on the first tool call.
+Then run Claude Code **in kitty or Ghostty**, give it something chunky to do, and rot. That's it — the daemon boots itself, and the feed starts the moment you submit a prompt, so even Claude's thinking time is rot time.
 
 **Ghostty (≥1.3)** works out of the box — the panel docks via Ghostty's AppleScript API (macOS asks once for Automation permission the first time).
 
@@ -48,6 +48,17 @@ Without it, rotpilot falls back to a separate kitty window. Switch explicitly wi
 
 Once the panel appears it **stays in view**: on a snap-back the video freezes and the panel roasts you ("claude finished. one of you had to.") until Claude gets back to work — then the rot resumes instantly, same panel. It fully closes only when you press q, the session ends, or you turn rotpilot off.
 
+### Controls
+
+Click the panel to give it focus, then:
+
+- **↑ / ↓** — scroll the feed by hand. The auto-advance notices and re-times itself around the clip you land on
+- **p** — pause the rot yourself. Same frozen panel you get when Claude needs you, and it *stays* paused: Claude getting back to work won't undo it
+- **r** — resume. Works out of any pause, including one Claude caused
+- **q** (or esc) — closes the TV (and the engine Chrome) and snoozes until your next prompt
+
+A held **p** is released by **r** or by your next prompt — the same contract as **q**.
+
 ### Making it stop
 
 - press **q** (or esc) inside the TV — closes it (and the engine Chrome) and snoozes until your next prompt
@@ -60,12 +71,13 @@ rotpilot is **per-project and terminal-only**: `rotpilot on` in a project turns 
 
 | command | what |
 |---|---|
-| `rotpilot init` | install hooks into Claude Code (idempotent; `--uninstall` to remove) |
+| `rotpilot init` | install hooks into Claude Code (idempotent; `rotpilot off` to remove) |
 | `rotpilot demo` | 30 seconds of the full loop, no Claude needed |
-| `rotpilot stats` | your rot report — rot ratio, an 8-week rot heatmap, trend vs usual, your budget meter. screenshot it, you coward |
+| `rotpilot stats` | your rot report — rot ratio, rot by weekday, trend vs usual, your budget meter. screenshot it, you coward |
 | `rotpilot recap` | what you missed this session — instant, local, no setup. `--all` / `"question"` reach across sessions & repos (Engram) |
+| `rotpilot loose` | every question claude asked and never got an answer to — all repos, all sessions (Engram) |
 | `rotpilot budget <amount>` | set a rot ration stats holds you to — `budget 10m` (daily), `budget 1h --weekly`, `budget off` |
-| `rotpilot engram` | set up the optional Engram memory (`key` / `transcripts on\|off` / `check`) |
+| `rotpilot engram` | set up the Engram memory (`key` / `transcripts on\|off` / `check`) |
 | `rotpilot feed <name>` | switch feed: `localLoop` \| `shorts` \| `instagram` |
 | `rotpilot window <mode>` | `panel` (split beside Claude, default) \| `window` (separate) |
 | `rotpilot on` / `off` | per-project switch — turn the rot on/off for the current project |
@@ -90,14 +102,16 @@ rotpilot is **per-project and terminal-only**: `rotpilot on` in a project turns 
 ```
 claude code hook ──▶ rotpilot hook <event> ──unix socket──▶ rotpilotd
                                                               │
+                              prompt submitted ──▶ play (thinking time is rot time)
+                                                              │
                                         headful Chrome ──CDP screencast──▶ PNG frames
                                                               │
                                         kitty graphics protocol ──▶ your terminal
                                                               │
-                            permission prompt / done ──▶ pause, clear, ding, focus snaps back
+                         permission / done ──▶ freeze + roast, ding, focus snaps back
 ```
 
-- Hooks are installed `async` where it matters — a dead daemon can never slow down or break a Claude session (the hook client no-ops in ~45ms).
+- The "claude is working" hooks are `async` — a dead daemon can never slow down or break a Claude session (the hook client no-ops in ~45ms). The pause hooks are deliberately sync: `PermissionRequest` fires *before* the dialog is painted, so the feed is already frozen by the time you see it.
 - Chrome runs headful with an isolated profile and anti-throttle flags; the window hides behind your terminal. You watch the *terminal*. Chrome is just the engine.
 - Read-only by design: rotpilot scrolls to watch. It will never like, follow, comment, or DM.
 
@@ -115,11 +129,34 @@ Every snap-back screen prices what just streamed by, parsed locally from the ses
 
 ### 🧠 Across time & repos (Engram, opt-in)
 
-Recap works locally out of the box (above). A single local transcript can't do two things, though: remember a session after it's gone, and answer a *question* across repos. If you want those, you can **optionally** connect [Engram](https://docs.weaviate.io/engram), an external memory service. It's off by default and entirely opt-in — rotpilot works fully without it.
+Here's the thing local can't fix. **Every question Claude asks while you're rotting dies with the session that asked it.** Claude Code writes one JSONL transcript per session and rotates them — so "what was Claude waiting on me for, in the other repo, last Tuesday?" is permanently unanswerable from your disk. `rotpilot stats` prices the leak for you:
 
-With your explicit opt-in, the transcript slice from each rot window is sent to **your own** Engram project as a conversation, and its extraction pipeline splits it into exactly two memories: what still **needs you** (`loose_ends`: questions asked into the void, approvals it waited on, warnings you scrolled past) and what Claude **did** (`claude_work`: the receipts). The did-vs-needs-you split is made by the pipeline reading the dialogue — rotpilot parses nothing.
+```
+▎ loose ends
 
-For setting up Engram, read [Engram Quickstart](./docs/engram-quickstart.md). Once the project's wired up and you have a key:
+  claude asked you 14 things this week while you weren't looking.
+  those sessions are gone, and took the questions with them.
+```
+
+[Engram](https://docs.weaviate.io/engram) is what keeps them. It's off by default, entirely opt-in, and rotpilot is fully functional without it — but it buys you one thing nothing else can:
+
+```
+rotpilot loose
+```
+
+**A standing to-do list you never wrote** — every question, approval, and warning Claude surfaced while you weren't looking, across *every* repo and *every* session, most overdue first:
+
+```
+  you've got ten things hanging from three different projects, oldest
+  gathering dust since july 2nd. twenty-five days, and the only movement
+  has been you refreshing your phone 124 times.
+
+  · decide whether to apply claude's fix to aura/views/posts.py  (aura)
+  · claude never ran the grep it offered in OmniSearch/frontend  (omnisearch)
+  · pick a demo shape — it's been waiting on you since monday  (playground)
+```
+
+Engram's extraction pipeline does the did-vs-needs-you split by reading the dialogue (rotpilot parses nothing), and its merge step folds the same unanswered question from three sessions into one line instead of three. Setup: [Engram Quickstart](./docs/engram-quickstart.md). Two more modes come free with it:
 
 ```
 rotpilot recap --all                    # this repo, across every past session — not just this one
@@ -159,7 +196,8 @@ The briefing is synthesized at read time by **your own** Claude (the `claude` CL
   "sound": true,                // the snap-back ding
   "muteFeed": false,            // true = feed never has sound. default: sound while showing, silent when paused/hidden
   "engram": { "userId": "rotpilot-…", "shareTranscripts": false }, // key in engram.key (0600); transcripts opt-in via `rotpilot engram transcripts on`
-  "allowInstagram": false
+  "allowInstagram": false,
+  "budget": { "limitSec": 600, "period": "day", "since": "…" } // absent unless you set one — use `rotpilot budget 10m`, not this
 }
 ```
 

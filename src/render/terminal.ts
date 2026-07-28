@@ -244,5 +244,23 @@ export async function frontmostApp(): Promise<string | null> {
 }
 
 export async function activateApp(name: string): Promise<void> {
-  await run('osascript', ['-e', `tell application "${name.replace(/"/g, '')}" to activate`]);
+  // asStr, not a bare interpolation: escapes backslashes as well as quotes, so a
+  // pathological app name can't terminate the AppleScript string literal
+  const app = asStr(name);
+  const r = await run('osascript', ['-e', `tell application ${app} to activate`]);
+  if (r.ok) return;
+  // frontmostApp reports PROCESS names, which aren't always the AppleScript
+  // application name (VS Code's process is "Code"). System Events keys off the
+  // process name, so it can still land what `tell application` just missed.
+  await run('osascript', [
+    '-e',
+    `tell application "System Events" to set frontmost of first application process whose name is ${app} to true`,
+  ]);
+}
+
+/** Is `name` (from frontmostApp) one of the terminals rotpilot lives in? Lets the
+ * daemon tell "you're sitting in the terminal" from "you're off in another app",
+ * which is the difference between a focus grab being helpful and being rude. */
+export function isTerminalApp(name: string): boolean {
+  return /^(kitty|ghostty)$/i.test(name.trim());
 }

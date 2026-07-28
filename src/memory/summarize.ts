@@ -62,11 +62,20 @@ function emptyMcpConfig(): string {
   return p;
 }
 
-/** Run Haiku headless on `prompt`, prompt via stdin. null on any trouble.
- * The full recap prompt takes ~10-17s idle, but spikes well past 30s when the
- * session is busy (daemon capturing frames + Chrome running) — which is exactly
- * when recap runs — so give it generous headroom before falling back. */
-function runClaude(prompt: string, timeoutMs = 60000): Promise<string | null> {
+/**
+ * Run Haiku headless on `prompt` (fed via stdin); null on any trouble.
+ *
+ * Latency note, measured: `claude -p` costs 5s of session overhead before it
+ * generates a token, and a real recap prompt lands anywhere in 15–80s with a
+ * long tail. Shrinking the prompt, dropping tools, and replacing the system
+ * prompt were all tried and none of them moved it — the variance is upstream.
+ *
+ * So it is BOUNDED rather than tuned: past the timeout the caller falls back to
+ * the de-noised plain list, which is instant and perfectly readable. A recap
+ * that always lands inside half a minute beats one that is occasionally great
+ * and occasionally looks like a hang.
+ */
+function runClaude(prompt: string, timeoutMs = 30000): Promise<string | null> {
   return new Promise((resolve) => {
     let proc;
     try {
@@ -117,10 +126,18 @@ function runClaude(prompt: string, timeoutMs = 60000): Promise<string | null> {
 const VOICE =
   'You are rotpilot: a sardonic terminal companion that plays brainrot videos while Claude Code does ' +
   "the actual work, then catches the user up on what they missed while they watched reels. You just " +
-  'watched this person doomscroll while an AI fixed their code. Dry, funny, a little mean — think ' +
-  '"claude finished. one of you had to." Keep every technical specific EXACT (file names, line numbers, ' +
-  'the actual bug) and NEVER invent facts not in the fragments. Drop mechanical noise (opening files, ' +
-  'running searches). Second person ("you"). Terse. Lowercase. No markdown "#" headers, no preamble.';
+  'watched this person doomscroll while an AI fixed their code, and you are not going to be gracious ' +
+  'about it. Be genuinely mean — deadpan, contemptuous, unimpressed. Think "claude finished. one of ' +
+  'you had to." Rub in the gap between what the machine shipped and what they contributed. Take shots ' +
+  'at the specific work: if it was hard, note they would not have managed it; if it was trivial, note ' +
+  'they could not even be bothered. Never encouraging, never a pep talk, no "nice work", no ' +
+  'consolation prize at the end. Punch at their work ethic and attention span, NOT at their ' +
+  'intelligence, body, or worth as a person — contempt for the habit, not cruelty about who they are. ' +
+  'No slurs, no genuine hostility, and never suggest they are beyond help. It should read like a ' +
+  'friend who thinks you are being pathetic today and says so. Keep every technical specific EXACT ' +
+  '(file names, line numbers, the actual bug) and NEVER invent facts not in the fragments — the ' +
+  'insults are yours to make up, the facts are not. Drop mechanical noise (opening files, running ' +
+  'searches). Second person ("you"). Terse. Lowercase. No markdown "#" headers, no preamble.';
 
 /** Engram's `created_at` as a numeric sort key (one rot window = one commit).
  * Undated memories sort last (-Infinity). */
@@ -129,16 +146,24 @@ function fragTime(iso?: string): number {
   return Number.isFinite(t) ? t : -Infinity;
 }
 
-/** Fragments, newest-first. Recency is carried by ORDER, not a printed date:
+/** Fragments in `order`. Recency is carried by ORDER, not a printed date:
  * an absolute date label would fight the date extraction bakes into the content
  * (commit day vs. work day can differ) and give Haiku a second, conflicting
  * clock. The prompts just tell it the list is newest-first — retrieval still
  * ranks by relevance; the freshest fragment simply leads the context. */
-function frags(mems: EngramMemory[]): string {
+function frags(mems: EngramMemory[], order: 'newest' | 'oldest' = 'newest', clipTo = 0): string {
+  const dir = order === 'newest' ? -1 : 1;
   return [...mems]
-    .sort((a, b) => fragTime(b.created_at) - fragTime(a.created_at))
-    .map((m) => `[${m.topic ?? '?'}] ${m.content}`)
+    .sort((a, b) => dir * (fragTime(a.created_at) - fragTime(b.created_at)))
+    .map((m) => {
+      const c = clipTo ? clip(m.content, clipTo) : m.content;
+      return `[${m.topic ?? '?'}] ${c}`;
+    })
     .join('\n');
+}
+
+function clip(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max).replace(/\s+\S*$/, '') + '…' : s;
 }
 
 /** rotContext (from the local rot store) lets Haiku reference real rot
@@ -200,6 +225,34 @@ export function funRecap(
 /** Question mode: answer the user's question from the retrieved fragments. */
 export function funAnswer(question: string, mems: EngramMemory[], rotContext?: string): Promise<string | null> {
   return runClaude(answerPrompt(question, mems, rotContext));
+}
+
+export function loosePrompt(mems: EngramMemory[], rotContext?: string): string {
+  return (
+    `${VOICE}\n${ctxBlock(rotContext)}\nBelow are the things Claude asked, flagged, or needed a decision on ` +
+    'while the user was watching reels — across EVERY project they rot in, going back past the sessions ' +
+    'that are long gone. Oldest first. Turn them into a standing to-do list they never wrote.\n\n' +
+    'Shape:\n' +
+    '1. ONE line naming the size of the debt — how many things are hanging and roughly how long the ' +
+    'oldest has been ignored. Be contemptuous about the pile, not encouraging about clearing it.\n' +
+    '2. a flat list, one line each, MOST OVERDUE FIRST: what it wants, and which project it belongs to ' +
+    'in parentheses. Keep file names, identifiers, and figures EXACT.\n' +
+    'Fold duplicates of the same ask into one line. Drop anything the fragments show was already ' +
+    'resolved. No closing pep talk, no "you got this".\n' +
+    `${HEADER_RULE}\n\n` +
+    // oldest first, matching the ordering the prompt promises above; engram's
+    // extracted prose runs long, and a to-do line only needs the ask
+    frags(mems, 'oldest', 220)
+  );
+}
+
+/**
+ * The premium payoff: a cross-project, cross-session list of what still needs
+ * the user. Local transcripts cannot produce this — the sessions that asked
+ * these questions no longer exist on disk.
+ */
+export function funLoose(mems: EngramMemory[], rotContext?: string): Promise<string | null> {
+  return runClaude(loosePrompt(mems, rotContext), 45000);
 }
 
 /** The exact prompt for a LOCAL (Tier-0) recap: same voice + shape as the Engram

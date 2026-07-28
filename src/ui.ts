@@ -56,24 +56,21 @@ export function progressBar(frac: number, width = 16): string {
   return brand('█'.repeat(filled)) + red('█'.repeat(over)) + dim('░'.repeat(rest));
 }
 
-// heatmap: a GitHub-contributions grid, but for rot. Five intensities — a dim
-// track dot for a clean day, then lime brightening with the damage. Truecolor
-// when we have it; density glyphs when we don't, so the grid survives NO_COLOR.
-const HEAT_RGB: [number, number, number][] = [
-  [74, 105, 24],
-  [106, 150, 34],
-  [135, 190, 44],
-  [163, 230, 53],
-];
-const HEAT_MONO = ['·', '░', '▒', '▓', '█'];
+interface Bar {
+  label: string;
+  value: number;
+  display: string;
+}
 
-/** One heatmap cell for an intensity `level` 0–4 (0 = no rot that day). */
-export function heatCell(level: number): string {
-  const l = Math.max(0, Math.min(4, Math.round(level)));
-  if (!colorOn) return HEAT_MONO[l];
-  if (l === 0) return dim('·');
-  const [r, g, b] = HEAT_RGB[l - 1];
-  return `\x1b[38;2;${r};${g};${b}m█\x1b[0m`;
+/** A horizontal bar block: lime fill on a dim track, dim label + value. Rows
+ * scale to the largest value, and the track is a fixed width so the value
+ * column lines up down the block. */
+export function bars(rows: Bar[], width = 18): string[] {
+  const max = Math.max(1, ...rows.map((r) => r.value));
+  return rows.map((r) => {
+    const n = Math.round((r.value / max) * width);
+    return `  ${dim(r.label.padEnd(4))}${brand('█'.repeat(n))}${dim('░'.repeat(width - n))} ${dim(r.display)}`;
+  });
 }
 
 /** A dim inline breakdown line: "done: 23  ·  idle: 3". */
@@ -118,7 +115,7 @@ export function card(title: string, sections: CardSection[]): string {
  * paths, identifiers, and figures pop out of the grey. Numbers first, on clean
  * text — then code — so the number pass never sees (and mangles) an SGR escape.
  * With color off, backticks are still stripped so prose reads cleanly. */
-export function emphasize(text: string): string {
+function emphasize(text: string): string {
   if (!colorOn) return text.replace(/`([^`]+)`/g, '$1');
   return text
     .replace(/\b\d[\d.,:]*(?:[–-]\d[\d.,:]*)?\w*/g, (n) => {
@@ -172,7 +169,14 @@ export function spinner(msg: string): () => void {
   if (!process.stderr.isTTY) return () => {};
   const frames = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
   let i = 0;
-  const iv = setInterval(() => process.stderr.write(`\r\x1b[2K${brand(frames[i++ % frames.length])} ${dim(msg)}`), 80);
+  const t0 = Date.now();
+  const iv = setInterval(() => {
+    // show elapsed once it stops feeling instant — a bare spinner on a job that
+    // can run half a minute is indistinguishable from a hang, and people ^C it
+    const s = Math.floor((Date.now() - t0) / 1000);
+    const age = s >= 3 ? dim(` ${s}s`) : '';
+    process.stderr.write(`\r\x1b[2K${brand(frames[i++ % frames.length])} ${dim(msg)}${age}`);
+  }, 80);
   iv.unref?.();
   return () => {
     clearInterval(iv);

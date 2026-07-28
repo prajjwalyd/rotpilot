@@ -59,7 +59,7 @@ export const CHROME_PROFILE_DIR = path.join(CONFIG_DIR, 'chrome-profile');
 export const ENGRAM_KEY_PATH = path.join(CONFIG_DIR, 'engram.key');
 export const KITTY_SOCK = path.join(CONFIG_DIR, 'kitty-tv.sock');
 
-export const DEFAULT_CONFIG: RotpilotConfig = {
+const DEFAULT_CONFIG: RotpilotConfig = {
   feed: 'localLoop',
   fps: 20,
   watchBoundsMs: [5000, 60000],

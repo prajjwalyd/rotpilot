@@ -18,6 +18,58 @@ function clip(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + '…' : s;
 }
 
+/**
+ * Keep ONLY the field that says what a tool call did, taken from the full input
+ * and clipped as a value.
+ *
+ * The old path stringified the whole input and cut the blob at 300 chars, which
+ * sliced through the middle of string values — and the extractor needs a closing
+ * quote to match. Every Bash call with a long command therefore rendered as the
+ * content-free "run a command": 17 of 32 action lines in a real session, more
+ * than half the recap's action budget spent saying nothing.
+ */
+function salientInput(name: string, input: unknown): string {
+  const o = (input ?? {}) as Record<string, unknown>;
+  const str = (k: string): string | undefined => (typeof o[k] === 'string' ? (o[k] as string) : undefined);
+  const keep = (k: string, v: string, max: number): string => JSON.stringify({ [k]: clip(v.replace(/\s+/g, ' '), max) });
+  if (EDIT_TOOLS.has(name)) {
+    const f = str('file_path') ?? str('notebook_path');
+    if (f) return keep('file_path', shortPath(f), 80);
+  }
+  if (COMMAND_TOOLS.has(name)) {
+    const c = str('command');
+    if (c) return keep('command', commandHead(c), 70);
+  }
+  for (const k of ['pattern', 'query', 'url', 'description', 'prompt']) {
+    const v = str(k);
+    if (v) return keep(k, v, 80);
+  }
+  return '{}';
+}
+
+/**
+ * The SHAPE of a command, not its payload. A recap reader wants "ran pytest",
+ * never 400 characters of python heredoc — so cut at the first separator and
+ * keep the head. `curl … | python3 -c '…'` becomes `curl …`.
+ */
+function commandHead(c: string): string {
+  const segs = c
+    .split(/\n|\||;|&&/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  // `cd /tmp && python3 …` did python, not cd. Skip the scaffolding verbs and
+  // report the first segment that actually does something.
+  const NOISE = /^(cd|echo|pwd|ls|export|source|set|true)\b/;
+  return segs.find((s) => !NOISE.test(s)) ?? segs[0] ?? c.trim();
+}
+
+/** Last two segments of a path: `/Users/me/proj/src/a.ts` → `src/a.ts`. Absolute
+ * paths are 60+ chars of prefix nobody reads, repeated on every action line. */
+function shortPath(p: string): string {
+  const parts = p.split('/').filter(Boolean);
+  return parts.slice(-2).join('/') || p;
+}
+
 // Read-only exploration tools change nothing, so shipping them to Engram just
 // mints "Read the file X" / "searched for Y" memories that bloat claude_work
 // and fill the recap page toward its cap with filler. Any finding worth keeping
@@ -68,7 +120,7 @@ export function transcriptWindow(
       .map((b) => ({
         id: String(b.id),
         type: 'function' as const,
-        function: { name: String(b.name), arguments: clip(JSON.stringify(b.input ?? {}), 300) },
+        function: { name: String(b.name), arguments: salientInput(String(b.name), b.input) },
       }));
     if (!text && toolCalls.length === 0) continue;
     out.push({
@@ -113,6 +165,9 @@ function salientArg(name: string, argsJson: string): string {
 export function renderMessages(messages: ConvMessage[], maxChars = 9000): string {
   const blocks: string[] = [];
   let used = 0;
+  // Editing one file six times is one fact, not six lines. Walking newest→oldest
+  // means the kept copy is the most recent, and the count rides along with it.
+  const seen = new Map<string, { line: string; n: number }>();
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     const lines: string[] = [];
@@ -120,7 +175,17 @@ export function renderMessages(messages: ConvMessage[], maxChars = 9000): string
       if (m.content) lines.push(`you: ${m.content}`);
     } else if (m.role === 'assistant') {
       if (m.content) lines.push(`claude: ${m.content}`);
-      for (const t of m.tool_calls ?? []) lines.push(`  → ${salientArg(t.function.name, t.function.arguments)}`);
+      for (const t of m.tool_calls ?? []) {
+        const act = `  → ${salientArg(t.function.name, t.function.arguments)}`;
+        const hit = seen.get(act);
+        if (hit) {
+          hit.n++;
+          continue; // already counted on the newer copy
+        }
+        const entry = { line: act, n: 1 };
+        seen.set(act, entry);
+        lines.push(act);
+      }
     }
     if (!lines.length) continue;
     const block = lines.join('\n');
@@ -128,7 +193,18 @@ export function renderMessages(messages: ConvMessage[], maxChars = 9000): string
     used += block.length + 1;
     blocks.push(block);
   }
-  return blocks.reverse().join('\n');
+  // Stamp repeat counts now that every occurrence is tallied. Keyed on the WHOLE
+  // line: a substring replace puts the ×N mid-line whenever one action line is a
+  // prefix of a longer one ("run python3 - <<'EOF'" inside "…EOF' > /tmp/q.json").
+  return blocks
+    .reverse()
+    .join('\n')
+    .split('\n')
+    .map((l) => {
+      const hit = seen.get(l);
+      return hit && hit.n > 1 ? `${l} ×${hit.n}` : l;
+    })
+    .join('\n');
 }
 
 /**
@@ -137,6 +213,12 @@ export function renderMessages(messages: ConvMessage[], maxChars = 9000): string
  * works from the first snap-back with no Engram anything. Returns null when
  * the window contained nothing to brag about.
  */
+/** How many of Claude's messages in this window asked the user something. Stored
+ * per break so `stats` can price what the local transcript is about to forget. */
+export function countQuestions(messages: ConvMessage[]): number {
+  return messages.filter((m) => m.role === 'assistant' && m.content?.includes('?')).length;
+}
+
 export function missedLine(messages: ConvMessage[]): string | null {
   let edits = 0;
   let commands = 0;

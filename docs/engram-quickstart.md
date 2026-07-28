@@ -1,6 +1,8 @@
 # Engram Quickstart
 
-`rotpilot recap` needs one thing: an Engram project with two topics, scoped so every repo you rot through lands in the same memory. This is a one-time, ~2-minute setup in the [Engram console](https://console.weaviate.cloud/).
+**What this buys you:** `rotpilot loose` — every question Claude asked while you were rotting, still unanswered, across every repo and every session. Claude Code's transcripts are per-session and rotate, so once a session ends its unanswered questions are gone from your disk for good. This is the one thing rotpilot cannot do locally.
+
+`rotpilot recap` already works without any of this, on the current session. Engram adds the cross-session and cross-repo reads on top: one Engram project with two topics, scoped so every repo you rot through lands in the same memory. A one-time, ~2-minute setup in the [Engram console](https://console.weaviate.cloud/).
 
 Docs: https://docs.weaviate.io/engram
 

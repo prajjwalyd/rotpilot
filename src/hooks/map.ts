@@ -72,8 +72,11 @@ export async function runHook(name: string): Promise<void> {
         msg = { event: 'subagent-stop' };
         break;
       case 'attention':
-        // Notification hook: notification_type distinguishes the idle nag from
-        // a permission prompt. Treat as permission unless clearly idle.
+        // Fired by two events. PermissionRequest is the fast path — it runs
+        // before the dialog is painted and carries no notification_type, so it
+        // falls through to 'permission', which is exactly right. Notification is
+        // the backup, and its notification_type separates the idle nag from a
+        // permission prompt.
         msg = {
           event: 'snap-back',
           reason: payload.notification_type === 'idle_prompt' ? 'idle' : 'permission',

@@ -1,5 +1,5 @@
 /**
- * IDLE ─(work-start, debounced)─▶ PLAYING ─(resident snap-back)─▶ PAUSED
+ * IDLE ─(prompt | work-start, debounced)─▶ PLAYING ─(resident snap-back)─▶ PAUSED
  *   ▲                                │  ▲                            │
  *   └────(close snap-back)───────────┘  └──(work-start, quick)───────┘
  *
@@ -55,6 +55,11 @@ export class StateMachine {
     private cbs: StateCbs,
     private debounceMs = 600, // cold start: filter trivial tasks
     private resumeMs = 120, // from PAUSED: near-instant, tiny anti-flash gap
+    // Prompt-triggered start. Longer than the tool debounce on purpose: a
+    // throwaway "hi" answered in two seconds shouldn't flash the panel open and
+    // shut, and nobody notices half a second at the head of a real thinking
+    // phase.
+    private promptMs = 600,
   ) {}
 
   private clearTimer(): void {
@@ -72,7 +77,7 @@ export class StateMachine {
     // its owner (and daemon-internal events, which carry no sessionId) steer it.
     const sid = ctx.sessionId;
     if (this.state !== 'idle' && this.owner && sid && sid !== this.owner) return;
-    if (this.state === 'idle' && event === 'work-start') {
+    if (this.state === 'idle' && (event === 'work-start' || event === 'prompt')) {
       this.owner = sid;
       this.ctx = {}; // fresh cycle: no target leakage from a previous session
     }
@@ -82,9 +87,27 @@ export class StateMachine {
     }
 
     switch (event) {
-      case 'prompt':
-        this.suppressUntil = 0; // fresh turn
+      // A submitted prompt starts the rot window. Claude begins thinking the
+      // moment you hit enter, and that phase can run for many seconds — waiting
+      // for the first tool call left it playing nothing. It doubles as the
+      // resume signal after a pause, and clears the post-'done' suppression
+      // because a new turn is unambiguously fresh work.
+      case 'prompt': {
+        this.suppressUntil = 0;
+        if (this.state === 'idle') {
+          this.pendingKind = 'cold';
+          this.workStartedAt = Date.now();
+          this.state = 'pending';
+          this.clearTimer();
+          this.timer = setTimeout(() => this.fire(), this.promptMs);
+        } else if (this.state === 'paused') {
+          this.pendingKind = 'resume';
+          this.state = 'pending';
+          this.clearTimer();
+          this.timer = setTimeout(() => this.fire(), this.resumeMs);
+        }
         break;
+      }
 
       case 'work-start': {
         if (Date.now() < this.suppressUntil) return;
@@ -135,12 +158,29 @@ export class StateMachine {
           } else if (this.state === 'paused') {
             this.cbs.pause(info); // update the joke to the new reason
           }
-          // done/end: swallow straggler tool events for a beat
+          // Straggler guard. Work signals ride ASYNC hooks, so one spawned a
+          // moment before the pause can be delivered a moment after it and
+          // resume the feed instantly — the pause flashes and the video is back.
+          // A permission gets a shorter window than done/session-end: the real
+          // approve→PostToolUse signal can legitimately arrive soon after, and
+          // swallowing that would strand the pause until the auto-resume timer.
           if (reason === 'done' || reason === 'session-end') this.suppressUntil = Date.now() + 1500;
+          else if (reason === 'permission' || reason === 'idle') this.suppressUntil = Date.now() + 700;
         }
         break;
       }
     }
+  }
+
+  /**
+   * Resume on purpose — the auto-resume timer firing, or you pressing r. Both
+   * are deliberate, so they step over the straggler guard that would otherwise
+   * swallow them (it exists to ignore hooks that were already in flight, not
+   * decisions made after the fact).
+   */
+  resumeNow(): void {
+    this.suppressUntil = 0;
+    this.onEvent('work-start', {});
   }
 
   private fire(): void {

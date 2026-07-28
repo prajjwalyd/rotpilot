@@ -29,7 +29,7 @@ export function humanDuration(sec: number): string {
 }
 
 /** Local midnight (ms) for the day containing `ms`. */
-export function localMidnight(ms: number): number {
+function localMidnight(ms: number): number {
   const d = new Date(ms);
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 }

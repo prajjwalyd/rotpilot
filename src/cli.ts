@@ -21,6 +21,13 @@ if (fast === 'hook') {
   await mainCli();
 }
 
+/** name → what you're signing up for. Shown by `init`, in feed order of harm. */
+const FEED_BLURBS: Array<[string, string]> = [
+  ['localLoop', 'the default — one local video on loop, no network'],
+  ['shorts', 'youtube shorts'],
+  ['instagram', 'reels — opt-in, at your own risk'],
+];
+
 async function mainCli(): Promise<void> {
   const { Command } = await import('commander');
   const path = await import('node:path');
@@ -29,6 +36,37 @@ async function mainCli(): Promise<void> {
   const { request, fireAndForget } = await import('./daemon/ipc.js');
   const { loadConfig, saveConfig, PID_PATH, SOCKET_PATH, CONFIG_PATH } = await import('./config.js');
   const ui = await import('./ui.js'); // shared CLI styling (see src/ui.ts)
+
+  // Shared by every synthesized report (recap, loose) so they render identically.
+  // Tolerant header match: Haiku drifts ("claude handled:", "**your move**",
+  // "Claude Handled") — normalise them all to one styled label so the structure
+  // renders consistently instead of sometimes-plain.
+  const LABEL = /^[#*\s]*(claude handled|your move|needs you|done)\b[\s:*]*$/i;
+  const fmtSynth = (text: string): string =>
+    text
+      .split('\n')
+      .map((line) => {
+        const t = line.trim();
+        if (!t) return '';
+        const m = t.match(LABEL);
+        if (m) return ui.heading(m[1].toLowerCase());
+        return ui.wrapText(line, '  ', 68);
+      })
+      .join('\n');
+
+  /** `--raw`: dump the exact prompt sent to Haiku — plain and copy-pasteable. */
+  const printRaw = async (prompt: string, kind: string, n: number): Promise<void> => {
+    const { MODEL, summarizerAvailable } = await import('./memory/summarize.js');
+    console.log('');
+    console.log(
+      ui.dim(
+        `── raw · ${kind} · model ${MODEL} · ${n} unit${n === 1 ? '' : 's'} · summarizer ${summarizerAvailable() ? 'available' : 'unavailable'} ──`,
+      ),
+    );
+    console.log('');
+    console.log(prompt);
+    console.log('');
+  };
 
   const cliPath = path.resolve(process.argv[1]);
 
@@ -88,18 +126,12 @@ async function mainCli(): Promise<void> {
   program
     .command('init')
     .description('install rotpilot into claude code (hooks + checks)')
-    .option('--uninstall', 'remove rotpilot hooks from claude code')
-    .action(async (opts: { uninstall?: boolean }) => {
-      const { installHooks, uninstallHooks, uninstallGlobalHooks } = await import('./hooks/install.js');
+    // no --uninstall flag: it did exactly what `rotpilot off` does, one more
+    // way to spell the same thing
+    .action(async () => {
+      const { installHooks, uninstallGlobalHooks } = await import('./hooks/install.js');
       const { findKitty } = await import('./render/terminal.js');
       const { findChrome } = await import('./chrome/launch.js');
-      if (opts.uninstall) {
-        uninstallHooks(process.cwd());
-        const scrubbed = uninstallGlobalHooks();
-        console.log(ui.ok(`rotpilot hooks removed from ${process.cwd()}/.claude/settings.local.json`));
-        if (scrubbed) console.log(ui.ok('also scrubbed a legacy global install from ~/.claude/settings.json'));
-        return;
-      }
       ui.masthead('claude feeds you brainrot while it works — and yanks it away when it needs you');
       console.log('');
       // one-time: scrub any legacy global hooks from older versions
@@ -149,11 +181,18 @@ async function mainCli(): Promise<void> {
       console.log(ui.step(3, 'rot — it yanks the feed away when claude needs you'));
       console.log(ui.step(4, `${ui.bold('rotpilot stats')} — see the damage`));
       console.log('');
+      console.log(ui.tip('in the tv —', '↑↓ scroll · p pause · r resume · q quit'));
       console.log(ui.tip('enable in other projects —', 'rotpilot on'));
-      console.log(ui.tip('switch feeds —', 'rotpilot feed <name>'));
-      console.log(ui.tip('escape hatches —', 'q in the tv · rotpilot off · rotpilot stop'));
+      console.log(ui.tip('escape hatches —', 'rotpilot off · rotpilot stop'));
       console.log('');
-      console.log(ui.note('feeds: localLoop (default, safe) · shorts · instagram (opt-in, at your own risk)'));
+      console.log(ui.heading('feeds'));
+      console.log('');
+      for (const [name, what] of FEED_BLURBS) {
+        // pad BEFORE coloring so the escapes never skew the column
+        console.log(ui.bullet(`${ui.bold(name.padEnd(11))}${ui.dim(what)}`));
+      }
+      console.log('');
+      console.log(ui.tip('switch anytime —', 'rotpilot feed <name>'));
     });
 
   program
@@ -231,7 +270,7 @@ async function mainCli(): Promise<void> {
 
       if (action === 'key') {
         if (value === 'clear') {
-          console.log(clearApiKey() ? ui.ok('stored key removed') : 'no stored key to remove');
+          console.log(clearApiKey() ? ui.ok('stored key removed') : ui.note('no stored key to remove'));
           return;
         }
         let key = value;
@@ -294,17 +333,19 @@ async function mainCli(): Promise<void> {
         if (value === 'on') {
           console.log(ui.ok('transcript sharing ON — the "what you missed" memory is live.'));
           console.log('');
-          console.log('  what this means, plainly:');
-          console.log('  · when a rot window ends, the segment of the CLAUDE SESSION TRANSCRIPT that');
+          console.log(ui.heading('what this means, plainly'));
+          console.log('');
+          console.log(ui.bullet('when a rot window ends, the segment of the CLAUDE SESSION TRANSCRIPT that'));
           console.log('    streamed by while you watched (your prompts, claude\'s messages and tool');
           console.log('    calls — which can include code) is sent to YOUR Engram project');
-          console.log('  · engram splits it into what claude DID and what still NEEDS YOU —');
-          console.log('    `rotpilot recap` gets it back');
-          console.log('  · nothing is shared with rotpilot or anyone else; it goes to your project,');
-          console.log('    under your key. turn it off any time: rotpilot engram transcripts off');
+          console.log(ui.bullet('engram splits it into what claude DID and what still NEEDS YOU'));
+          console.log(ui.bullet('nothing is shared with rotpilot or anyone else — your project, your key'));
+          console.log('');
+          console.log(ui.tip('read it back —', 'rotpilot recap'));
+          console.log(ui.tip('turn it off any time —', 'rotpilot engram transcripts off'));
         } else {
           console.log(ui.ok('transcript sharing OFF — no session content leaves this machine.'));
-          console.log('  (local `rotpilot recap`, stats & budget still work; `recap --all` will go stale.)');
+          console.log(ui.note('local recap, stats & budget still work; `recap --all` will go stale'));
         }
         return;
       }
@@ -355,7 +396,7 @@ async function mainCli(): Promise<void> {
         process.exitCode = 1;
         return;
       }
-      console.log('1/3 auth + read — listing memories…');
+      console.log(ui.step(1, 'auth + read — listing memories…'));
       const list = await listMemories({ limit: 5 });
       if (!list) {
         console.log(ui.no('list failed — bad key or unreachable project.'));
@@ -366,7 +407,7 @@ async function mainCli(): Promise<void> {
       const topics = [...new Set(list.memories.map((m) => m.topic).filter(Boolean))];
       console.log('    ' + ui.ok(`authenticated${topics.length ? ` — topics seen: ${topics.join(', ')}` : ' (no memories yet)'}`));
 
-      console.log('2/3 write — a synthetic marked conversation (scope: rotpilot-check)…');
+      console.log(ui.step(2, 'write — a synthetic marked conversation (scope: rotpilot-check)…'));
       const conv = await sendCheckConversation();
       if (!conv) {
         console.log(ui.no('conversation input rejected.'));
@@ -394,7 +435,7 @@ async function mainCli(): Promise<void> {
             : '    ' + ui.note(`run status: ${status} — queued; extraction lands when the pipeline catches up (minutes is normal)`),
       );
 
-      console.log('3/3 search…');
+      console.log(ui.step(3, 'search…'));
       const search = await searchMemories('what did claude do recently?', { limit: 3 });
       if (search?.memories?.length) {
         console.log('    ' + ui.ok(`search works — ${search.memories.length} hit(s). first: "${search.memories[0].content.slice(0, 70)}…"`));
@@ -463,7 +504,7 @@ async function mainCli(): Promise<void> {
     .option('--all', 'recap everything engram remembers for this repo, across every past session')
     .action(async (words: string[], opts: { raw?: boolean; since?: string; all?: boolean }) => {
       const { engramEnabled, getRecap, searchRecap } = await import('./memory/engram.js');
-      const { summarizerAvailable, funRecap, funAnswer, funLocalRecap, recapPrompt, answerPrompt, localRecapPrompt, MODEL } =
+      const { summarizerAvailable, funRecap, funAnswer, funLocalRecap, recapPrompt, answerPrompt, localRecapPrompt } =
         await import('./memory/summarize.js');
       const { rotContext } = await import('./memory/store.js');
       const cfg = loadConfig();
@@ -473,34 +514,6 @@ async function mainCli(): Promise<void> {
       // lead-in so the raw list at least reads cleanly
       const clean = (s: string) =>
         s.replace(/^On\s+\w+\s+\d{1,2}\s+\w+\s+\d{4},?\s*/i, '').replace(/^Claude\s+/, '');
-      // tolerant header match: Haiku drifts ("claude handled:", "**your move**",
-      // "Claude Handled") — normalise them all to one styled label so the
-      // structure renders consistently instead of sometimes-plain.
-      const LABEL = /^[#*\s]*(claude handled|your move|needs you|done)\b[\s:*]*$/i;
-      const fmtSynth = (text: string): string =>
-        text
-          .split('\n')
-          .map((line) => {
-            const t = line.trim();
-            if (!t) return '';
-            const m = t.match(LABEL);
-            if (m) return ui.heading(m[1].toLowerCase());
-            return ui.wrapText(line, '  ', 68);
-          })
-          .join('\n');
-      // `--raw`: dump the exact prompt (voice + rot stats + fragments) sent to
-      // Haiku — plain and copy-pasteable, no box, no synthesis.
-      const printRaw = (prompt: string, kind: string, n: number) => {
-        console.log('');
-        console.log(
-          ui.dim(
-            `── raw · ${kind} · model ${MODEL} · ${n} unit${n === 1 ? '' : 's'} · summarizer ${summarizerAvailable() ? 'available' : 'unavailable'} ──`,
-          ),
-        );
-        console.log('');
-        console.log(prompt);
-        console.log('');
-      };
       // the two cross-session modes (--all, "question") need the optional Engram
       // memory; say so plainly instead of erroring, so local recap still stands
       // on its own and Engram reads as optional, not a paywall
@@ -622,7 +635,7 @@ async function mainCli(): Promise<void> {
           process.exitCode = 1;
           return;
         }
-        return printRaw(localRecapPrompt(project, messages, ctx), 'local', messages.length);
+        return await printRaw(localRecapPrompt(project, messages, ctx), 'local', messages.length);
       }
       if (!claudeDid.length) {
         const msg = messages.length
@@ -645,6 +658,12 @@ async function mainCli(): Promise<void> {
         for (const m of claudeDid.slice(-6)) {
           const first = (m.content ?? '').split('\n').find((l) => l.trim());
           if (first) body.push(ui.wrapText('• ' + first, '  ', 68));
+        }
+        // say why this is the plain version, so a timeout doesn't read as "the
+        // good output is broken"
+        if (summarizerAvailable()) {
+          body.push('');
+          body.push(ui.note('the synthesizer ran long — this is the plain list. ROTPILOT_SUMMARY=0 skips it entirely'));
         }
         sections = [{ heading: 'claude handled', body }];
       }
@@ -669,12 +688,12 @@ async function mainCli(): Promise<void> {
       }
       if (name === 'instagram' && !cfg.allowInstagram) {
         console.log(ui.warn('instagram mode is OPT-IN and at your own risk.'));
-        console.log('   automating instagram violates meta\'s terms of service; accounts can get');
-        console.log('   flagged or banned. rotpilot only scrolls (never likes/follows/comments)');
-        console.log('   and uses a real headful chrome, but the risk is yours. use a burner.');
+        console.log(ui.dim('   automating instagram violates meta\'s terms of service; accounts can get'));
+        console.log(ui.dim('   flagged or banned. rotpilot only scrolls (never likes/follows/comments)'));
+        console.log(ui.dim('   and uses a real headful chrome, but the risk is yours. use a burner.'));
         console.log('');
-        console.log('   to accept: set "allowInstagram": true in ~/.config/rotpilot/config.json,');
-        console.log('   then run `rotpilot feed instagram` again.');
+        console.log(ui.tip('to accept — add "allowInstagram": true to', '~/.config/rotpilot/config.json'));
+        console.log(ui.tip('then —', 'rotpilot feed instagram'));
         process.exitCode = 1;
         return;
       }
@@ -709,10 +728,8 @@ async function mainCli(): Promise<void> {
         console.log(ui.ok(`removed ${CONFIG_DIR} (config, rot history, chrome profile)`));
       }
       console.log('');
-      console.log('last step (removes this command itself):');
-      console.log('  npm uninstall -g rotpilot');
-      console.log('');
-      console.log(`the two kitty.conf lines (allow_remote_control / listen_on) are yours to keep or remove: ${os.homedir()}/.config/kitty/kitty.conf`);
+      console.log(ui.tip('last step, removes this command itself —', 'npm uninstall -g rotpilot'));
+      console.log(ui.note(`the two kitty.conf lines are yours to keep or remove: ${os.homedir()}/.config/kitty/kitty.conf`));
     });
 
   program
@@ -724,8 +741,8 @@ async function mainCli(): Promise<void> {
       uninstallHooks(dir);
       await fireAndForget({ t: 'user-stop' }); // stop anything currently playing
       console.log(ui.ok(`rotpilot OFF for ${dir}`));
-      console.log('  removed hooks from ./.claude/settings.local.json — other projects keep theirs.');
-      console.log('  restart claude here for it to take effect.');
+      console.log(ui.note('removed hooks from ./.claude/settings.local.json — other projects keep theirs'));
+      console.log(ui.note('restart claude here for it to take effect'));
     });
 
   program
@@ -739,16 +756,18 @@ async function mainCli(): Promise<void> {
       const dir = process.cwd();
       installHooks(dir);
       console.log(ui.ok(`rotpilot ON for ${dir}`));
-      console.log('  hooks written to ./.claude/settings.local.json (this project only, not committed).');
+      console.log(ui.note('hooks in ./.claude/settings.local.json — this project only, not committed'));
+      console.log(ui.note('restart claude in this project (in kitty or ghostty) to pick it up'));
       if (!process.env.KITTY_LISTEN_ON && process.env.TERM_PROGRAM !== 'ghostty') {
         console.log('');
         console.log(ui.warn('you are not in a supported terminal, so nothing will play here.'));
-        console.log('   rotpilot is terminal-only: run claude in ghostty (≥1.3, works out of the');
-        console.log('   box) or kitty (needs two lines in ~/.config/kitty/kitty.conf + restart):');
-        console.log('     allow_remote_control socket-only');
-        console.log('     listen_on unix:/tmp/kitty');
+        // continuations sit under the ⚠ glyph's text column (3), dim like other
+        // secondary prose
+        console.log(ui.dim('   rotpilot is terminal-only: run claude in ghostty (≥1.3, works out of the'));
+        console.log(ui.dim('   box) or kitty (needs two lines in ~/.config/kitty/kitty.conf + restart):'));
+        console.log(ui.dim('     allow_remote_control socket-only'));
+        console.log(ui.dim('     listen_on unix:/tmp/kitty'));
       }
-      console.log('  restart claude in this project (in kitty or ghostty) to pick it up.');
     });
 
   program
@@ -771,6 +790,59 @@ async function mainCli(): Promise<void> {
         console.log('     listen_on unix:/tmp/kitty');
         console.log('   until then rotpilot falls back to a separate window.');
       }
+    });
+
+  // The one thing only Engram can do: the questions Claude asked while you were
+  // rotting outlive the sessions that asked them. Claude Code's transcripts are
+  // per-session JSONL and rotate, so this list is unbuildable locally.
+  program
+    .command('loose')
+    .description("everything claude asked you and never got an answer to — every repo, every session")
+    .option('--raw', 'print the fragments instead of synthesizing')
+    .action(async (opts: { raw?: boolean }) => {
+      const { looseEnds, engramEnabled } = await import('./memory/engram.js');
+      const { funLoose, loosePrompt, summarizerAvailable } = await import('./memory/summarize.js');
+      const { rotContext } = await import('./memory/store.js');
+      if (!engramEnabled()) {
+        console.log('');
+        console.log(
+          ui.card('loose ends · needs engram', [
+            {
+              body: [
+                ui.dim("  every question claude asks while you rot dies with that session — claude code's"),
+                ui.dim('  transcripts are per-session and rotate. this list is the one thing your machine'),
+                ui.dim('  cannot rebuild afterwards, so it needs engram: an optional memory you connect.'),
+              ],
+            },
+            { body: [ui.tip('set it up —', 'rotpilot engram')] },
+          ]),
+        );
+        console.log('');
+        return;
+      }
+      const stop = ui.spinner('counting what you owe…');
+      const mems = await looseEnds();
+      const ctx = rotContext();
+      const synth = !opts.raw && mems?.length && summarizerAvailable() ? await funLoose(mems, ctx) : null;
+      stop();
+      if (!mems?.length) {
+        console.log('');
+        console.log(
+          ui.card('loose ends', [
+            { body: [ui.dim('  nothing hanging. either you answered everything or you never rotted. sure.')] },
+          ]),
+        );
+        console.log('');
+        return;
+      }
+      if (opts.raw) return await printRaw(loosePrompt(mems, ctx), 'loose', mems.length);
+      const body = synth
+        ? fmtSynth(synth).split('\n')
+        : mems.map((m) => ui.wrapText('• ' + m.content.replace(/^On [^,]+, /, ''), '  ', 68));
+      console.log('');
+      console.log(ui.card('loose ends', [{ body }]));
+      console.log('');
+      if (!synth && summarizerAvailable()) console.log(ui.note('synthesizer ran long — raw fragments shown') + '\n');
     });
 
   program

@@ -309,6 +309,28 @@ export async function getRecap(project: string): Promise<Recap | null> {
   return { looseEnds: recent(loose).slice(0, 6), work: recent(work).slice(0, 8) };
 }
 
+/**
+ * Every loose end across EVERY project, oldest first.
+ *
+ * This is the one thing a local transcript physically cannot do. Claude Code's
+ * per-session JSONL rotates, so the questions Claude asked while you were
+ * rotting die with the session that asked them. Engram keeps them, and its
+ * merge pipeline folds the same question asked across three sessions into one
+ * memory instead of three.
+ *
+ * Oldest first on purpose: the thing you've ignored longest leads.
+ */
+export async function looseEnds(limit = 10): Promise<EngramMemory[] | null> {
+  if (!engramEnabled()) return null;
+  // no property filter = every project you've ever rotted in
+  const r = await listMemories({ topics: ['loose_ends'], limit: 100 });
+  if (!r) return null;
+  return r.memories
+    .filter((m) => m.properties?.project !== 'rotpilot-check')
+    .sort((a, b) => byRecent(b, a))
+    .slice(0, limit);
+}
+
 /** Semantic search across everything Claude did while the user rotted —
  * ALL projects (property filters omitted on purpose). Filters out the
  * self-test memories `engram check` writes under the fake rotpilot-check

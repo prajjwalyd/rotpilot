@@ -13,6 +13,8 @@ export interface BreakEvent {
   workSeconds: number; // how long Claude worked
   rotSeconds: number; // how long you rotted
   responseLatencyMs?: number | null; // snap-back → your next action in Claude
+  /** how many things claude asked you during this window — the debt stats prices */
+  questions?: number;
 }
 
 interface Store {

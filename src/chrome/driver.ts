@@ -22,6 +22,87 @@ const CURRENT_VIDEO_JS = `(() => {
   return best;
 })()`;
 
+/**
+ * The scroll-snap container a clip lives in: walk UP from the video until an
+ * ancestor can actually scroll. Generic, so it works on any snap feed without
+ * site-specific container selectors.
+ *
+ * Folded into FEED_PROBE_JS so the advance code resolves the container from the
+ * SAME video watchOne is timing. They used to disagree — the watcher timed the
+ * clip in view while the advance scrolled whatever container the first
+ * `offsetWidth > 0` video happened to sit in.
+ */
+const SNAP_CONTAINER_FN_JS = `((v) => {
+  let el = v ? v.parentElement : null;
+  while (el && el.scrollHeight - el.clientHeight < 100) el = el.parentElement;
+  return el;
+})`;
+
+/**
+ * Page-side probe shared by the advance logic: which clip is showing, and when
+ * the feed has stopped moving.
+ *
+ * `sig()` deliberately uses the SNAPPED INDEX (offset / viewport height), not the
+ * raw scrollTop — a smooth scroll that gets pulled back to the same clip by
+ * scroll-snap still moves scrollTop through dozens of intermediate values, so a
+ * raw-offset comparison reports success for an advance that went nowhere.
+ *
+ * `quiet()` waits for the offset to hold still across consecutive samples. Every
+ * check brackets itself with it, so momentum from the previous attempt can't be
+ * misread as this one landing.
+ */
+export const FEED_PROBE_JS = `{
+  container: ${SNAP_CONTAINER_FN_JS},
+  cur() { return ${CURRENT_VIDEO_JS}; },
+  src(v) { return (v && (v.currentSrc || v.src)) || ''; },
+  top() { const c = this.container(this.cur()); return Math.round(c ? c.scrollTop : scrollY); },
+  sig() {
+    const c = this.container(this.cur());
+    const h = (c ? c.clientHeight : innerHeight) || 1;
+    return this.src(this.cur()) + '|' + Math.round(this.top() / h);
+  },
+  async quiet(ticks) {
+    let last = NaN, stable = 0;
+    for (let i = 0; i < ticks; i++) {
+      await new Promise((r) => setTimeout(r, 80));
+      const t = this.top();
+      if (t === last) { if (++stable >= 2) return; } else { stable = 0; last = t; }
+    }
+  },
+}`;
+
+/**
+ * Page-side watcher: resolves once the clip on screen has had its one
+ * play-through. 'ended' for clips that finish, 'looped' for shorts/reels (which
+ * loop rather than ever firing `ended`), 'changed' if the feed moved on without
+ * us, 'timeout' as the structural clamp — a stalled video fires neither `ended`
+ * nor a wrap, so without the clamp this would hang forever.
+ */
+function watchOneExpr(maxMs: number): string {
+  return `(() => new Promise((res) => {
+    const src = (v) => (v && (v.currentSrc || v.src)) || '';
+    const first = ${CURRENT_VIDEO_JS};
+    if (!first) return setTimeout(() => res('no-video'), 3000);
+    const src0 = src(first);
+    let last = first.currentTime;
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      if (Date.now() - t0 > ${Math.round(maxMs)}) { clearInterval(iv); return res('timeout'); }
+      // Re-resolve every tick instead of holding the element we started with.
+      // Feeds that swap the <video> node per clip (rather than reusing one
+      // player) would otherwise leave us timing an element that has scrolled
+      // away and will never end or wrap — a clip stuck for the whole max bound.
+      const v = ${CURRENT_VIDEO_JS};
+      if (!v) return; // transient, mid-swap
+      if (src(v) !== src0) { clearInterval(iv); return res('changed'); }
+      if (v.ended) { clearInterval(iv); return res('ended'); }
+      const ct = v.currentTime;
+      if (ct + 0.75 < last) { clearInterval(iv); return res('looped'); }
+      last = Math.max(last, ct);
+    }, 250);
+  }))()`;
+}
+
 export class ChromeSession {
   private chrome: ChromeProc | null = null;
   private client: CDP.Client | null = null;
@@ -235,6 +316,18 @@ export class ChromeSession {
    */
   softPause(): void {
     this.stopScrolling();
+    void this.silence();
+  }
+
+  /**
+   * Mute + pause every video, resolving once the mute has actually LANDED in the
+   * page (the guard's own enforce is fire-and-forget). The snap-back cue is
+   * played after this resolves: a reel at full volume masks a short wav, which is
+   * why the sound only ever seemed to fire when nothing was playing.
+   */
+  async silence(): Promise<void> {
+    this.stopPlayGuard();
+    await this.evalAllVideos('v.muted=true;v.pause()');
     this.startSilenceGuard();
   }
 
@@ -290,16 +383,20 @@ export class ChromeSession {
         const started = Date.now();
         const why = await this.watchOne(Math.max(2000, maxMs));
         if (!alive()) return;
+        // the feed already moved on without us — someone scrolled by hand, or
+        // the page auto-advanced. Don't advance again on top of that; just start
+        // watching whatever is on screen now, from the top.
+        if (why === 'changed') continue;
         const remain = Math.max(1000, minMs) - (Date.now() - started);
         if (remain > 0) await new Promise((r) => setTimeout(r, remain));
         if (!alive()) return;
         try {
-          await this.feed().next(this.client!);
-          log(`advance (${why})`);
+          const how = await this.feed().next(this.client!);
+          log(`advance (${why}) -> ${how ?? 'ok'}`);
         } catch (e) {
           log('advance error', e as Error);
         }
-        await new Promise((r) => setTimeout(r, 1500)); // let the next clip snap in and start
+        await new Promise((r) => setTimeout(r, 600)); // let the new clip start
       }
     };
     void loop();
@@ -319,19 +416,7 @@ export class ChromeSession {
     if (!this.client) return 'no-client';
     try {
       const r = await this.client.Runtime.evaluate({
-        expression: `(() => new Promise((res) => {
-          const v = ${CURRENT_VIDEO_JS};
-          if (!v) return setTimeout(() => res('no-video'), 3000);
-          let last = v.currentTime;
-          const t0 = Date.now();
-          const iv = setInterval(() => {
-            if (Date.now() - t0 > ${Math.round(maxMs)}) { clearInterval(iv); return res('timeout'); }
-            if (v.ended) { clearInterval(iv); return res('ended'); }
-            const ct = v.currentTime;
-            if (ct + 0.75 < last) { clearInterval(iv); return res('looped'); }
-            last = Math.max(last, ct);
-          }, 250);
-        }))()`,
+        expression: watchOneExpr(maxMs),
         awaitPromise: true,
         returnByValue: true,
       });
@@ -339,6 +424,26 @@ export class ChromeSession {
     } catch {
       return 'eval-failed';
     }
+  }
+
+  /**
+   * Manual scroll, driven by the arrow keys in the TV panel. Restarts the watch
+   * loop so the clip you just landed on gets a full play-through before the
+   * automatic advance takes over again.
+   */
+  async step(dir: 'up' | 'down'): Promise<string> {
+    if (!this.client) return 'no-client';
+    const feed = this.feed();
+    let how = 'noop';
+    try {
+      how = (dir === 'down' ? await feed.next(this.client) : await feed.prev?.(this.client)) ?? 'noop';
+    } catch (e) {
+      log('manual step error', e as Error);
+      how = 'error';
+    }
+    this.startScrolling(); // bumps the generation: old loop dies, dwell restarts
+    log(`manual ${dir} -> ${how}`);
+    return how;
   }
 
   async teardown(): Promise<void> {
@@ -360,8 +465,9 @@ export class ChromeSession {
 }
 
 /** Dispatch a key press (used by feeds to advance to the next short/reel). */
-export async function pressKey(client: CDP.Client, key: 'ArrowDown'): Promise<void> {
-  const info = { key, code: key, windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40 };
+export async function pressKey(client: CDP.Client, key: 'ArrowDown' | 'ArrowUp'): Promise<void> {
+  const vk = key === 'ArrowDown' ? 40 : 38;
+  const info = { key, code: key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk };
   await client.Input.dispatchKeyEvent({ type: 'rawKeyDown', ...info });
   await new Promise((r) => setTimeout(r, 40 + Math.random() * 80));
   await client.Input.dispatchKeyEvent({ type: 'keyUp', ...info });

@@ -13,7 +13,7 @@ const PAGGA = "░█▀▄░█▀█░▀█▀░█▀█░▀█▀░�
 const PAGGA_W = 32;
 
 /** Paint every non-empty line flat lime (or leave plain when !useColor). */
-export function paintLime(text: string, useColor: boolean): string {
+function paintLime(text: string, useColor: boolean): string {
   if (!useColor) return text;
   return text
     .split('\n')

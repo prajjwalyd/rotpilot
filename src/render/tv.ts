@@ -105,10 +105,19 @@ function paint(size: TermSize, blocks: Block[]): void {
   process.stdout.write(out);
 }
 
-function pauseScreen(size: TermSize, joke: string, missed?: string, remainingSec?: number): void {
+function pauseScreen(
+  size: TermSize,
+  joke: string,
+  missed?: string,
+  remainingSec?: number,
+  manual = false,
+): void {
   const w = Math.max(12, size.cols - 4);
-  const status =
-    remainingSec == null
+  // a pause you asked for has no auto-resume behind it — say so plainly instead
+  // of promising claude will pick it back up
+  const status = manual
+    ? 'stays paused until you say otherwise'
+    : remainingSec == null
       ? 'resumes when claude gets back to work'
       : remainingSec > 0
         ? `resuming in ${remainingSec}s`
@@ -116,7 +125,11 @@ function pauseScreen(size: TermSize, joke: string, missed?: string, remainingSec
   const blocks: Block[] = [
     brandBlock(size),
     { kind: 'gap', rows: 1 },
-    { kind: 'line', text: '⏸  ROT PAUSED — claude needs you', style: S_HEAD },
+    {
+      kind: 'line',
+      text: manual ? '⏸  ROT PAUSED — by you' : '⏸  ROT PAUSED — claude needs you',
+      style: S_HEAD,
+    },
     { kind: 'gap', rows: 1 },
     ...wrap(joke, w).map((t): Block => ({ kind: 'line', text: t, style: S_BODY })),
     // the local "while you rotted: …" receipt — the reason to look up
@@ -129,7 +142,7 @@ function pauseScreen(size: TermSize, joke: string, missed?: string, remainingSec
     { kind: 'gap', rows: 2 },
     ...wrap(status, w).map((t): Block => ({ kind: 'line', text: t, style: S_DIM })),
     { kind: 'gap', rows: 1 },
-    { kind: 'line', text: 'press  q  to dismiss', style: S_DIM },
+    { kind: 'line', text: 'press  r  to resume   ·   q  to dismiss', style: S_DIM },
   ];
   paint(size, blocks);
 }
@@ -186,7 +199,13 @@ export async function runTv(test: boolean, fpsArg?: number): Promise<void> {
   let latest: Buffer | null = null;
   let dirty = false;
   let showingText = true;
-  let screen: { mode: 'waiting' | 'paused' | 'idle'; joke?: string; missed?: string; remaining?: number } = {
+  let screen: {
+    mode: 'waiting' | 'paused' | 'idle';
+    joke?: string;
+    missed?: string;
+    remaining?: number;
+    manual?: boolean;
+  } = {
     mode: 'waiting',
   };
   let timer: NodeJS.Timeout | null = null;
@@ -224,7 +243,8 @@ export async function runTv(test: boolean, fpsArg?: number): Promise<void> {
   };
   sock.on('connect', () => send({ t: 'tv-hello', ...size }));
 
-  // q / esc / ctrl-c inside the TV = "stop feeding me" (snoozes until next prompt)
+  // Keys inside the TV: q / esc / ctrl-c = "stop feeding me" (snoozes until the
+  // next prompt); ↑/↓ = drive the feed by hand.
   const armKeys = () => {
     if (!process.stdin.isTTY) return;
     process.stdin.setRawMode?.(true);
@@ -232,6 +252,15 @@ export async function runTv(test: boolean, fpsArg?: number): Promise<void> {
   };
   process.stdin.on('data', (d) => {
     const s = d.toString('utf8');
+    // Arrows before the stop check: they arrive as a CSI sequence ('\x1b[B'),
+    // which is not bare '\x1b', so esc-to-quit still only fires on a real esc.
+    // Both forms — terminals send SS3 ('\x1bOB') in application cursor mode.
+    if (s === '\x1b[B' || s === '\x1bOB') return send({ t: 'scroll', dir: 'down' });
+    if (s === '\x1b[A' || s === '\x1bOA') return send({ t: 'scroll', dir: 'up' });
+    // p / r — hold and release the rot yourself, the same resident pause claude
+    // triggers when it needs you
+    if (s === 'p') return send({ t: 'user-pause' });
+    if (s === 'r') return send({ t: 'user-resume' });
     // exact keystrokes only — CSI responses to our size queries also land here
     if (s === 'q' || s === 'x' || s === '\x1b' || s === '\x03') {
       send({ t: 'user-stop' });
@@ -245,7 +274,8 @@ export async function runTv(test: boolean, fpsArg?: number): Promise<void> {
     send({ t: 'tv-resize', ...size });
     // if a text screen is up (not video), repaint it at the new size
     if (showingText) {
-      if (screen.mode === 'paused' && screen.joke) pauseScreen(size, screen.joke, screen.missed, screen.remaining);
+      if (screen.mode === 'paused' && screen.joke)
+        pauseScreen(size, screen.joke, screen.missed, screen.remaining, screen.manual);
       else if (screen.mode === 'idle' && screen.joke) greetingScreen(size, screen.joke);
       else waitingScreen(size);
     }
@@ -278,8 +308,9 @@ export async function runTv(test: boolean, fpsArg?: number): Promise<void> {
         const joke = String(msg.msg ?? 'claude needs you.');
         const missed = typeof msg.missed === 'string' && msg.missed ? msg.missed : undefined;
         const cd = typeof msg.countdownSec === 'number' && msg.countdownSec > 0 ? msg.countdownSec : undefined;
-        screen = { mode: 'paused', joke, missed, remaining: cd };
-        pauseScreen(size, joke, missed, cd);
+        const manual = msg.manual === true;
+        screen = { mode: 'paused', joke, missed, remaining: cd, manual };
+        pauseScreen(size, joke, missed, cd, manual);
         showingText = true;
         if (cd) {
           countdown = setInterval(() => {

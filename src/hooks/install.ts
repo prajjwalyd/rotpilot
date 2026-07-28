@@ -23,31 +23,54 @@ function projectSettingsPath(projectDir: string): string {
   return path.join(projectDir, '.claude', 'settings.local.json');
 }
 
-// event → cli hook arg. High-frequency "claude is working" signals are ASYNC
-// (docs: async only skips the wait, it does not delay when the hook fires) so
-// the ~80ms node startup never blocks Claude's loop on every tool call/message.
-// The must-not-drop pause/lifecycle signals (Stop/Notification/SessionEnd) stay
-// SYNC: async hooks can be killed when `claude -p` exits, which would leave the
-// feed playing forever.
+// event → cli hook arg.
+//
+// ASYNC vs SYNC: high-frequency "claude is working" signals are ASYNC (docs:
+// async only skips the wait, it does not delay when the hook fires) so the
+// ~80ms node startup never blocks Claude's loop on every tool call/message.
+// Pause and lifecycle signals stay SYNC — async hooks can be killed when
+// `claude -p` exits, which would leave the feed playing forever — and
+// PermissionRequest MUST be sync to beat the dialog to the screen.
+//
+// A matcher is omitted where we want every occurrence: per the documented
+// syntax any matcher containing special characters is compiled as an unanchored
+// regex, and `*` is not a valid one ("Nothing to repeat"). Omitting is the
+// documented match-all.
 const WIRING: Array<{ event: string; arg: string; matcher?: string; async?: boolean }> = [
   // warm the daemon + chrome before the first tool, killing cold-start lag
   { event: 'SessionStart', arg: 'session-start', async: true },
+  // A submitted prompt is the START of the rot window, not just a prewarm cue:
+  // it fires before the model sees the prompt, so the thinking phase — which
+  // used to play nothing until the first tool call — is covered.
   { event: 'UserPromptSubmit', arg: 'prompt', async: true },
   // "Claude is working" signals → play. MessageDisplay fires while Claude is
   // streaming output, so it resumes the instant Claude responds (e.g. after you
   // answer a question) — the official replacement for tailing the transcript.
-  { event: 'PreToolUse', arg: 'work-start', matcher: '*', async: true },
-  { event: 'PostToolUse', arg: 'work-start', matcher: '*', async: true },
+  { event: 'PreToolUse', arg: 'work-start', async: true },
+  { event: 'PostToolUse', arg: 'work-start', async: true },
   { event: 'MessageDisplay', arg: 'work-start', async: true },
+  // No hook fires when a permission is APPROVED, but one fires when it is
+  // auto-denied — and a denial means claude carries on, so it's a resume.
+  { event: 'PermissionDenied', arg: 'work-start', async: true },
   // Subagents: their tool calls fire NO hooks in the parent session (docs), so
   // SubagentStart is the only "working" signal during an agent run — and the
   // daemon counts them so a Stop while a background agent still runs is not
   // treated as "claude finished".
   { event: 'SubagentStart', arg: 'subagent-start', async: true },
   { event: 'SubagentStop', arg: 'subagent-stop' },
-  // "Claude needs you" signals → pause + alert
-  { event: 'Notification', arg: 'attention', matcher: 'permission_prompt|idle_prompt' },
+  // "Claude needs you" signals → pause + alert.
+  //
+  // PermissionRequest fires when Claude Code is ABOUT TO SHOW the dialog and is
+  // consulted synchronously (it can answer the prompt on your behalf), so it
+  // completes before the dialog paints — the earliest possible pause. We return
+  // nothing, which is "no objection": the dialog shows exactly as it would have.
+  // Notification stays as the backup for any mode where it doesn't fire.
+  { event: 'PermissionRequest', arg: 'attention' },
+  { event: 'Notification', arg: 'attention', matcher: 'permission_prompt|idle_prompt|elicitation_dialog' },
   { event: 'Stop', arg: 'done' },
+  // a turn killed by an API error (rate limit, server error) ends without a
+  // Stop; without this the feed runs on until the 10-minute watchdog
+  { event: 'StopFailure', arg: 'done' },
   { event: 'SessionEnd', arg: 'session-end' },
 ];
 
