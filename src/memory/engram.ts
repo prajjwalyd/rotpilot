@@ -169,7 +169,24 @@ export interface EngramMemory {
   topic?: string;
   score?: number;
   created_at?: string;
+  /** last time Engram touched this memory — its merge pipeline moves this
+   * forward when a repeat of the same ask folds in, so it tracks "still
+   * outstanding" where created_at only records when it was first raised */
+  updated_at?: string;
   properties?: Record<string, string>;
+}
+
+/**
+ * When a memory was last a live concern, as a numeric sort key.
+ *
+ * `updated_at` over `created_at` on purpose: Engram's merge pipeline folds a
+ * repeat of the same ask into the existing memory and moves `updated_at`
+ * forward, so it answers "is this still outstanding" where `created_at` only
+ * says when it was first raised. Undated memories sort last (-Infinity).
+ */
+export function memTime(m: { created_at?: string; updated_at?: string }): number {
+  const t = Date.parse(m.updated_at ?? m.created_at ?? '');
+  return Number.isFinite(t) ? t : -Infinity;
 }
 
 /** Topic selector for search/list: a name, optionally with a scope filter. */
@@ -275,13 +292,6 @@ export function sendCheckConversation(): Promise<{ run_id: string; status: strin
 
 // ───────────────────────────── retrieval ─────────────────────────────
 
-export interface Recap {
-  /** what still needs the user, newest first — the punchline */
-  looseEnds: EngramMemory[];
-  /** what Claude did, newest first — the receipts */
-  work: EngramMemory[];
-}
-
 /** Newest first. created_at is per-ingestion-batch (one rot window = one commit
  * = one timestamp), so this orders by rot-window recency — exactly "what you
  * missed lately". Ties (same window) keep their returned order. */
@@ -289,24 +299,29 @@ function byRecent(a: EngramMemory, b: EngramMemory): number {
   return (Date.parse(b.created_at ?? '') || 0) - (Date.parse(a.created_at ?? '') || 0);
 }
 
-/** Everything Engram knows about one project — the `rotpilot recap` payload.
- * Returns null only when the key is missing or the API is unreachable.
+/**
+ * What Claude DID in one project, across every past session — the `--all` half
+ * of `recap`. Newest first. Null only when the key is missing or the API is
+ * unreachable; empty `work` means Engram simply has nothing yet.
  *
- * Freshness: `list` has NO server-side ordering (spec confirms — only `limit`),
- * so we pull a wide page and sort by created_at DESC ourselves; the most recent
- * rot windows always surface, whatever order the server returns. This is exact
- * up to the 100-row page cap (~15 rot sessions/project); beyond that, if the
- * server's default order isn't recency, the very oldest memories could fall off
- * the page — acceptable, since recap is about what you missed *lately*. */
-export async function getRecap(project: string): Promise<Recap | null> {
+ * Work only, never loose ends: those are the *other* half of the card and come
+ * from `looseEnds()`, which spans every project rather than this one.
+ *
+ * Freshness, and the catch: `list` takes no ordering, no date filter and no
+ * pagination (probed live against the strict schema; the official SDK has no
+ * list method at all), so we pull a page and sort by created_at DESC ourselves.
+ * The catch is WHICH page — the server truncates OLDEST-FIRST. Verified: a
+ * limit of 5 against a corpus spanning Jul 2–27 returns Jul 2–3. So once one
+ * project stores more than PAGE_MAX work memories, the newest — precisely what
+ * this half exists to show — are the ones that fall off, and nothing in the API
+ * can reach them. `capped` says the page came back full so the caller can warn
+ * instead of quietly showing stale work as if it were current.
+ */
+export async function getRecap(project: string): Promise<{ work: EngramMemory[]; capped: boolean } | null> {
   if (!engramEnabled()) return null;
-  const [loose, work] = await Promise.all([
-    listMemories({ topics: [{ name: 'loose_ends', properties: { project } }], limit: 100 }),
-    listMemories({ topics: [{ name: 'claude_work', properties: { project } }], limit: 100 }),
-  ]);
-  if (!loose && !work) return null;
-  const recent = (r: { memories: EngramMemory[] } | null) => [...(r?.memories ?? [])].sort(byRecent);
-  return { looseEnds: recent(loose).slice(0, 6), work: recent(work).slice(0, 8) };
+  const r = await listMemories({ topics: [{ name: 'claude_work', properties: { project } }], limit: PAGE_MAX });
+  if (!r) return null;
+  return { work: [...r.memories].sort(byRecent).slice(0, 8), capped: r.memories.length >= PAGE_MAX };
 }
 
 /**
@@ -320,15 +335,48 @@ export async function getRecap(project: string): Promise<Recap | null> {
  *
  * Oldest first on purpose: the thing you've ignored longest leads.
  */
-export async function looseEnds(limit = 10): Promise<EngramMemory[] | null> {
+export interface LooseEnds {
+  /** oldest-still-outstanding first, inside the window */
+  items: EngramMemory[];
+  /** how many survive the window, before the display cap */
+  inWindow: number;
+  /** how many came back, at any age — see `capped` */
+  total: number;
+  /** the server's page was full, so `total` is a floor, not a count. Engram caps
+   * `limit` at PAGE_MAX and offers no offset or cursor, so there is no way to
+   * see past it; reporting a truncated number as exact would read as the whole
+   * picture when it isn't.
+   *
+   * Truncation drops the NEWEST, which for this list is the harmless end: the
+   * oldest are the most overdue and lead the list anyway. (`getRecap` wants the
+   * opposite and is hurt by the same behaviour — see its note.) */
+  capped: boolean;
+  days: number;
+}
+
+/** Engram's hard ceiling: `limit` is rejected above this and there is no offset
+ * or cursor — verified live against the API, which validates strictly. */
+const PAGE_MAX = 100;
+
+export async function looseEnds(opts: { days?: number; limit?: number } = {}): Promise<LooseEnds | null> {
   if (!engramEnabled()) return null;
+  const { days = 14, limit = 6 } = opts;
   // no property filter = every project you've ever rotted in
-  const r = await listMemories({ topics: ['loose_ends'], limit: 100 });
+  const r = await listMemories({ topics: ['loose_ends'], limit: PAGE_MAX });
   if (!r) return null;
-  return r.memories
-    .filter((m) => m.properties?.project !== 'rotpilot-check')
-    .sort((a, b) => byRecent(b, a))
-    .slice(0, limit);
+  const mine = r.memories.filter((m) => m.properties?.project !== 'rotpilot-check');
+  // A window, because oldest-first over ALL history showed only the fossils: with
+  // 50 stored, the five 30-day-old ones filled half the list and the 45 recent
+  // (actionable) ones never appeared. Cheaper prompt AND a more useful list.
+  const cutoff = Date.now() - days * 86_400_000;
+  const live = mine.filter((m) => memTime(m) >= cutoff);
+  return {
+    items: live.sort((a, b) => memTime(a) - memTime(b)).slice(0, limit),
+    inWindow: live.length,
+    total: mine.length,
+    capped: r.memories.length >= PAGE_MAX,
+    days,
+  };
 }
 
 /** Semantic search across everything Claude did while the user rotted —

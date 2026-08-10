@@ -74,14 +74,14 @@ rotpilot is **per-project and terminal-only**: `rotpilot on` in a project turns 
 | `rotpilot init` | install hooks into Claude Code (idempotent; `rotpilot off` to remove) |
 | `rotpilot demo` | 30 seconds of the full loop, no Claude needed |
 | `rotpilot stats` | your rot report — rot ratio, rot by weekday, trend vs usual, your budget meter. screenshot it, you coward |
-| `rotpilot recap` | what you missed this session — instant, local, no setup. `--all` / `"question"` reach across sessions & repos (Engram) |
-| `rotpilot loose` | every question claude asked and never got an answer to — all repos, all sessions (Engram) |
+| `rotpilot recap` | what you missed this session, plus everything still waiting on you. `--all` / `"question"` reach across sessions & repos (Engram) |
 | `rotpilot budget <amount>` | set a rot ration stats holds you to — `budget 10m` (daily), `budget 1h --weekly`, `budget off` |
 | `rotpilot engram` | set up the Engram memory (`key` / `transcripts on\|off` / `check`) |
 | `rotpilot feed <name>` | switch feed: `localLoop` \| `shorts` \| `instagram` |
 | `rotpilot window <mode>` | `panel` (split beside Claude, default) \| `window` (separate) |
 | `rotpilot on` / `off` | per-project switch — turn the rot on/off for the current project |
 | `rotpilot status` / `start` / `stop` | daemon control |
+| `rotpilot uninstall` | full cleanup: daemon, chrome, hooks, and all local data |
 
 ### Requirements (v1)
 
@@ -138,15 +138,13 @@ Here's the thing local can't fix. **Every question Claude asks while you're rott
   those sessions are gone, and took the questions with them.
 ```
 
-[Engram](https://docs.weaviate.io/engram) is what keeps them. It's off by default, entirely opt-in, and rotpilot is fully functional without it — but it buys you one thing nothing else can:
+[Engram](https://docs.weaviate.io/engram) is what keeps them. It's off by default, entirely opt-in, and rotpilot is fully functional without it — but it buys you one thing nothing else can: the **second half of every recap**.
+
+`rotpilot recap` always prints two sections. The first — *this session* — is local and needs nothing. The second — *still on you* — is **a standing to-do list you never wrote**: every question, approval, and warning Claude surfaced while you weren't looking, across *every* repo and *every* session, most overdue first. Without Engram that section just tells you what it would hold; with it:
 
 ```
-rotpilot loose
-```
+▎ still on you
 
-**A standing to-do list you never wrote** — every question, approval, and warning Claude surfaced while you weren't looking, across *every* repo and *every* session, most overdue first:
-
-```
   you've got ten things hanging from three different projects, oldest
   gathering dust since july 2nd. twenty-five days, and the only movement
   has been you refreshing your phone 124 times.
@@ -156,7 +154,7 @@ rotpilot loose
   · pick a demo shape — it's been waiting on you since monday  (playground)
 ```
 
-Engram's extraction pipeline does the did-vs-needs-you split by reading the dialogue (rotpilot parses nothing), and its merge step folds the same unanswered question from three sessions into one line instead of three. Setup: [Engram Quickstart](./docs/engram-quickstart.md). Two more modes come free with it:
+Engram's extraction pipeline does the did-vs-needs-you split by reading the dialogue (rotpilot parses nothing), and its merge step folds the same unanswered question from three sessions into one line instead of three. `--days` widens the window (default 14). Setup: [Engram Quickstart](./docs/engram-quickstart.md). Two more modes come free with it:
 
 ```
 rotpilot recap --all                    # this repo, across every past session — not just this one
@@ -179,7 +177,7 @@ You watched reels; your memory watched Claude. Weeks later, in any repo, you can
   • green-light the code changes to posts.py (claude needs your approval)
 ```
 
-The briefing is synthesized at read time by **your own** Claude (the `claude` CLI you already have) running Haiku — no extra key, and it never leaves your machine beyond the Engram memories you opted into. No `claude` on PATH? recap degrades to a clean bulleted list. Disable synthesis with `ROTPILOT_SUMMARY=0`.
+The briefing is synthesized at read time by **your own** Claude (the `claude` CLI you already have) running Haiku — no extra key, and it never leaves your machine beyond the Engram memories you opted into. No `claude` on PATH? recap degrades to a clean bulleted list and says why. `rotpilot recap --plain` skips the write-up on demand.
 
 ## Config
 

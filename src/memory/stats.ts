@@ -96,7 +96,7 @@ function looseSection(week: BreakEvent[]): CardSection | null {
   return {
     heading: 'loose ends',
     body: on
-      ? [dim(`  claude asked you ${asked} things this week while you weren't looking.`), '', tip('the bill —', 'rotpilot loose')]
+      ? [dim(`  claude asked you ${asked} things this week while you weren't looking.`), '', tip('the bill —', 'rotpilot recap')]
       : [
           dim(`  claude asked you ${asked} things this week while you weren't looking.`),
           dim('  those sessions are gone, and took the questions with them.'),

@@ -195,9 +195,29 @@ export async function ghosttyLaunchPanel(cmd: string[]): Promise<GhosttyPanel | 
  * whole life, so a daemon denied once keeps failing until restarted. Point at
  * the fix rather than just logging a raw code. */
 function ghosttyPermHint(err: string): string {
-  return /-1743|not authori[sz]|Apple event/i.test(err)
-    ? '· automation permission denied — grant it in System Settings › Privacy & Security › Automation, then `rotpilot stop` to restart the daemon'
-    : '';
+  if (!isAutomationDenial(err)) return '';
+  automationDenied = true;
+  return '· automation denied for THIS process (cached for its lifetime) — respawning a clean daemon';
+}
+
+function isAutomationDenial(err: string): boolean {
+  return /-1743|not authori[sz]|Apple event/i.test(err);
+}
+
+/**
+ * macOS caches an AppleEvents denial against the *requesting process* for its
+ * entire life. The daemon is a long-lived singleton, so one denial early on
+ * leaves it unable to script Ghostty in every future session — while a freshly
+ * spawned process is granted normally. Verified: a poisoned daemon failed every
+ * attempt across sessions; a fresh one opened the pane immediately.
+ *
+ * The daemon reads this to decide it should exit and let the next hook boot a
+ * clean replacement, rather than staying silently broken forever.
+ */
+let automationDenied = false;
+
+export function automationWasDenied(): boolean {
+  return automationDenied;
 }
 
 /** Open the TV as a separate Ghostty window (fallback when there's no front window). */

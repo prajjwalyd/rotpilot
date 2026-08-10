@@ -53,14 +53,16 @@ function salientInput(name: string, input: unknown): string {
  * keep the head. `curl … | python3 -c '…'` becomes `curl …`.
  */
 function commandHead(c: string): string {
+  // Split on SEQUENCING only. A pipe is a filter chain — `ls | head` is an ls,
+  // and skipping to the first non-noise segment reported it as "head".
   const segs = c
-    .split(/\n|\||;|&&/)
+    .split(/\n|;|&&/)
     .map((s) => s.trim())
     .filter(Boolean);
-  // `cd /tmp && python3 …` did python, not cd. Skip the scaffolding verbs and
-  // report the first segment that actually does something.
+  // `cd /tmp && python3 …` did python, not cd — skip pure scaffolding verbs.
   const NOISE = /^(cd|echo|pwd|ls|export|source|set|true)\b/;
-  return segs.find((s) => !NOISE.test(s)) ?? segs[0] ?? c.trim();
+  const chosen = segs.find((s) => !NOISE.test(s)) ?? segs[0] ?? c.trim();
+  return chosen.split('|')[0].trim() || chosen;
 }
 
 /** Last two segments of a path: `/Users/me/proj/src/a.ts` → `src/a.ts`. Absolute
@@ -142,7 +144,9 @@ const COMMAND_TOOLS = new Set(['Bash', 'BashOutput']);
 function salientArg(name: string, argsJson: string): string {
   const grab = (key: string): string | null => {
     const m = argsJson.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`));
-    return m ? m[1] : null;
+    // un-escape: the value is still JSON-encoded, so quotes rendered as \" and
+    // backslashes doubled unless we decode them
+    return m ? m[1].replace(/\\(["\\\\/])/g, '$1').replace(/\\[nrt]/g, ' ') : null;
   };
   if (EDIT_TOOLS.has(name)) {
     const f = grab('file_path') ?? grab('notebook_path');
@@ -157,62 +161,65 @@ function salientArg(name: string, argsJson: string): string {
 }
 
 /**
- * Compact, token-lean rendering of a transcript window for the LOCAL recap
- * synthesizer — Claude's prose plus one short line per consequential tool call
- * ("→ edit posts.py", "→ run npm test"), oldest→newest, kept within a char
- * budget from the RECENT end so a long session never buries Haiku in context.
+ * Shell equivalents of NOISE_TOOLS: commands that inspect rather than change.
+ * `Read`/`Grep` are dropped at the tool level, but the same acts spelled as Bash
+ * survived and filled the digest with `run pwd` and `run echo "=== x ==="`.
  */
-export function renderMessages(messages: ConvMessage[], maxChars = 9000): string {
-  const blocks: string[] = [];
-  let used = 0;
-  // Editing one file six times is one fact, not six lines. Walking newest→oldest
-  // means the kept copy is the most recent, and the count rides along with it.
-  const seen = new Map<string, { line: string; n: number }>();
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    const lines: string[] = [];
-    if (m.role === 'user') {
-      if (m.content) lines.push(`you: ${m.content}`);
-    } else if (m.role === 'assistant') {
-      if (m.content) lines.push(`claude: ${m.content}`);
-      for (const t of m.tool_calls ?? []) {
-        const act = `  → ${salientArg(t.function.name, t.function.arguments)}`;
-        const hit = seen.get(act);
-        if (hit) {
-          hit.n++;
-          continue; // already counted on the newer copy
-        }
-        const entry = { line: act, n: 1 };
-        seen.set(act, entry);
-        lines.push(act);
-      }
-    }
-    if (!lines.length) continue;
-    const block = lines.join('\n');
-    if (used + block.length > maxChars && blocks.length) break; // keep the most recent within budget
-    used += block.length + 1;
-    blocks.push(block);
-  }
-  // Stamp repeat counts now that every occurrence is tallied. Keyed on the WHOLE
-  // line: a substring replace puts the ×N mid-line whenever one action line is a
-  // prefix of a longer one ("run python3 - <<'EOF'" inside "…EOF' > /tmp/q.json").
-  return blocks
-    .reverse()
-    .join('\n')
-    .split('\n')
-    .map((l) => {
-      const hit = seen.get(l);
-      return hit && hit.n > 1 ? `${l} ×${hit.n}` : l;
-    })
-    .join('\n');
-}
+const INSPECTION = /^run (echo|pwd|ls|cat|head|tail|which|env|printf|true|stat|file|date)\b/;
+
+/** Pure process narration — it says what Claude was about to do, never what
+ * happened, so it is noise in a list of what happened. */
+/** Harness chatter, not something you said: interrupt markers and the injected
+ * reminders Claude Code adds to a turn. */
+const USER_NOISE = /^(\[request interrupted|<(system-reminder|command-)|\[image)/i;
+
+const NARRATION = /^(let me\b|i'll\b|i will\b|now let\b|let's\b|checking\b|looking\b|first,|next,|no response requested)/i;
 
 /**
- * The instant dopamine: price a rot window in one dim line for the pause
- * screen — "3 edits · 2 commands · 1 question waiting". Local and free, so it
- * works from the first snap-back with no Engram anything. Returns null when
- * the window contained nothing to brag about.
+ * The last `max` things that happened, oldest to newest — the ONE artifact both
+ * the recap prompt and the plain fallback are built from.
+ *
+ * Previously those diverged: the model got the full rendered transcript (~8KB)
+ * while the fallback showed a six-line skim, so a failed synthesis showed you
+ * something Claude never saw, and you couldn't tell what it had been working
+ * from. Feeding the digest instead cuts the prompt roughly ninefold, which is
+ * the one lever that measurably moves `claude -p` latency.
+ *
+ * A "thing" is a tool action, a conclusion Claude reached, or a prompt you sent.
+ * Repeated actions collapse with a count, and pure narration is dropped.
  */
+export function digestLines(messages: ConvMessage[], max = 10): string[] {
+  const items: string[] = [];
+  const counts = new Map<string, number>();
+  const push = (s: string): void => {
+    if (items.length >= max) return;
+    items.push(s);
+  };
+  for (let i = messages.length - 1; i >= 0 && items.length < max; i--) {
+    const m = messages[i];
+    if (m.role === 'assistant') {
+      for (let j = (m.tool_calls ?? []).length - 1; j >= 0; j--) {
+        const t = m.tool_calls![j];
+        const act = salientArg(t.function.name, t.function.arguments);
+        if (INSPECTION.test(act)) continue;
+        const seen = counts.get(act);
+        counts.set(act, (seen ?? 0) + 1);
+        if (seen === undefined) push(act);
+      }
+      const first = (m.content ?? '').split('\n').find((l) => l.trim());
+      if (first && !NARRATION.test(first.trim())) push(clip(first.trim(), 160));
+    } else if (m.role === 'user' && m.content && !USER_NOISE.test(m.content.trim())) {
+      push(`you asked: ${clip(m.content.trim(), 120)}`);
+    }
+  }
+  return items
+    .reverse()
+    .map((l) => {
+      const n = counts.get(l) ?? 0;
+      return n > 1 ? `${l} ×${n}` : l;
+    });
+}
+
 /** How many of Claude's messages in this window asked the user something. Stored
  * per break so `stats` can price what the local transcript is about to forget. */
 export function countQuestions(messages: ConvMessage[]): number {

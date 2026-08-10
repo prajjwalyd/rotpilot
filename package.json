@@ -1,6 +1,6 @@
 {
   "name": "rotpilot",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Claude Code feeds you brainrot while it works and yanks it away the second it needs anything from you.",
   "author": "Prajjwal Yadav <prajjwalyd@gmail.com>",
   "license": "MIT",
@@ -33,7 +33,8 @@
     "build": "tsup",
     "prepublishOnly": "tsup",
     "dev": "tsup --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit --noUnusedLocals --noUnusedParameters",
+    "test": "esbuild test/*.test.ts --bundle --platform=node --format=esm --packages=external --outdir=.test-build --log-level=error && node --test .test-build/*.test.js"
   },
   "keywords": [
     "claude-code",
@@ -53,6 +54,7 @@
   "devDependencies": {
     "@types/chrome-remote-interface": "^0.31.14",
     "@types/node": "^22.10.0",
+    "esbuild": "^0.24.0",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2"
   }

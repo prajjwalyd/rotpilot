@@ -23,6 +23,7 @@ import {
   ghosttyLaunchWindow,
   ghosttyFocusTerminal,
   ghosttyCloseTerminal,
+  automationWasDenied,
   type Panel,
   type GhosttyPanel,
 } from '../render/terminal.js';
@@ -150,6 +151,35 @@ export async function runDaemon(): Promise<void> {
     return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../assets');
   }
 
+  /**
+   * Exit so the next hook boots a clean daemon.
+   *
+   * A macOS AppleEvents denial is cached against this process for its whole
+   * life, so once denied we can never dock a Ghostty pane again — not in this
+   * session, not in any future one. A fresh process gets granted normally, and
+   * hooks already auto-spawn the daemon, so quitting IS the repair.
+   *
+   * Rate-limited through a stamp file: if the grant is genuinely missing, every
+   * replacement would be denied too, and an unguarded version would respawn on
+   * every tool call.
+   */
+  function respawnForAutomationDenial(): void {
+    const stamp = path.join(path.dirname(PID_PATH), 'tcc-respawn');
+    const COOLDOWN_MS = 10 * 60 * 1000;
+    try {
+      const last = Date.parse(fs.readFileSync(stamp, 'utf8').trim());
+      if (Number.isFinite(last) && Date.now() - last < COOLDOWN_MS) {
+        log('automation denied, but a respawn was already tried recently — grant it in System Settings › Privacy & Security › Automation');
+        return;
+      }
+    } catch {}
+    try {
+      fs.writeFileSync(stamp, new Date().toISOString());
+    } catch {}
+    log('automation denied for this process — exiting so the next hook boots a clean daemon');
+    void teardown();
+  }
+
   async function waitForHello(ms = 10000): Promise<TvState | null> {
     const deadline = Date.now() + ms;
     while (Date.now() < deadline) {
@@ -186,6 +216,7 @@ export async function runDaemon(): Promise<void> {
         return waitForHello();
       }
       log('ghostty window launch failed');
+      if (automationWasDenied()) respawnForAutomationDenial();
       return null;
     }
 
@@ -312,10 +343,18 @@ export async function runDaemon(): Promise<void> {
         .catch(() => {});
       let tvMs = 0;
       let chromeMs = 0;
-      await Promise.all([
+      const [tvReady] = await Promise.all([
         ensureTv(ctx).then((r) => ((tvMs = Date.now() - t0), r)),
         chrome.ensure(cfgNow.feed).then(() => (chromeMs = Date.now() - t0)),
       ]);
+      // No panel means nowhere to draw. Starting the screencast anyway burned
+      // CPU encoding PNGs into the void and left Chrome running behind a
+      // terminal that shows nothing — which is what the ghostty-denied logs
+      // looked like from the outside.
+      if (!tvReady) {
+        log('no TV surface — skipping playback (chrome stays warm and silent)');
+        return;
+      }
       await startPlayback();
       // latency breakdown lands in daemon.log so slow plays are diagnosable
       log(`PLAY in ${Date.now() - t0}ms (tv ${tvMs}ms, chrome ${chromeMs}ms)`);

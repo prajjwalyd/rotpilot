@@ -37,22 +37,22 @@ async function mainCli(): Promise<void> {
   const { loadConfig, saveConfig, PID_PATH, SOCKET_PATH, CONFIG_PATH } = await import('./config.js');
   const ui = await import('./ui.js'); // shared CLI styling (see src/ui.ts)
 
-  // Shared by every synthesized report (recap, loose) so they render identically.
-  // Tolerant header match: Haiku drifts ("claude handled:", "**your move**",
-  // "Claude Handled") — normalise them all to one styled label so the structure
-  // renders consistently instead of sometimes-plain.
-  const LABEL = /^[#*\s]*(claude handled|your move|needs you|done)\b[\s:*]*$/i;
-  const fmtSynth = (text: string): string =>
-    text
-      .split('\n')
-      .map((line) => {
-        const t = line.trim();
-        if (!t) return '';
-        const m = t.match(LABEL);
-        if (m) return ui.heading(m[1].toLowerCase());
-        return ui.wrapText(line, '  ', 68);
-      })
-      .join('\n');
+  /**
+   * The one renderer for every synthesized report. The model's output is parsed
+   * into {headline, items} by `parseSynth` before it gets here, so this does no
+   * guessing — previously this function carried regexes for heading case, bold
+   * markers and three bullet glyphs, and each command applied them slightly
+   * differently.
+   */
+  const renderSynth = (s: import('./memory/summarize.js').Synth): string[] => {
+    const out: string[] = [];
+    if (s.headline) out.push(ui.wrapText(s.headline, '  ', 68));
+    if (s.headline && s.items.length) out.push('');
+    // continuations hang under the text, not the glyph, so a wrapped item reads
+    // as one thing
+    for (const it of s.items) out.push(`  ${ui.dim('·')} ${ui.wrapText(it, '    ', 66).trimStart()}`);
+    return out;
+  };
 
   /** `--raw`: dump the exact prompt sent to Haiku — plain and copy-pasteable. */
   const printRaw = async (prompt: string, kind: string, n: number): Promise<void> => {
@@ -498,18 +498,32 @@ async function mainCli(): Promise<void> {
 
   program
     .command('recap [question...]')
-    .description('what you missed while you rotted — this session, local & instant (--all: your whole history · "question": ask, both via engram)')
-    .option('--raw', 'print the exact prompt sent to haiku (no synthesis) — for debugging')
-    .option('--since <dur>', 'local: only summarize the last window, e.g. 30m or 2h (default: whole session)')
-    .option('--all', 'recap everything engram remembers for this repo, across every past session')
-    .action(async (words: string[], opts: { raw?: boolean; since?: string; all?: boolean }) => {
-      const { engramEnabled, getRecap, searchRecap } = await import('./memory/engram.js');
-      const { summarizerAvailable, funRecap, funAnswer, funLocalRecap, recapPrompt, answerPrompt, localRecapPrompt } =
-        await import('./memory/summarize.js');
+    .description('what you missed while you rotted — this session, plus everything still waiting on you ("question": ask across every repo)')
+    .option('--all', 'widen the first half to this repo across every past session, not just this one (engram)')
+    .option('--days <n>', 'how far back "still on you" reaches', '14')
+    .option('--plain', 'skip the write-ups and just list what happened (instant)')
+    .option('--raw', 'print the exact prompts sent to haiku (no synthesis) — for debugging')
+    .action(async (words: string[], opts: { raw?: boolean; all?: boolean; days?: string; plain?: boolean }) => {
+      const { engramEnabled, getRecap, searchRecap, looseEnds } = await import('./memory/engram.js');
+      const {
+        summarizerAvailable,
+        funRecap,
+        funAnswer,
+        funLocalRecap,
+        funLoose,
+        recapPrompt,
+        answerPrompt,
+        localRecapPrompt,
+        loosePrompt,
+        ageLabel,
+        noSynth,
+      } = await import('./memory/summarize.js');
       const { rotContext } = await import('./memory/store.js');
       const cfg = loadConfig();
       const ctx = rotContext();
       const project = path.basename(process.cwd());
+      const days = Math.max(1, parseInt(opts.days ?? '14', 10) || 14);
+      const synthOn = !opts.plain && !opts.raw && summarizerAvailable();
       // fallback (no claude / offline): strip the repeated "On <date>, Claude "
       // lead-in so the raw list at least reads cleanly
       const clean = (s: string) =>
@@ -541,8 +555,7 @@ async function mainCli(): Promise<void> {
         if (!engramEnabled()) return needsEngram(`asking "${q}" across every repo you've rotted through`);
         const stop = ui.spinner(`catching you up on "${q}"…`);
         const r = await searchRecap(q);
-        const synth =
-          !opts.raw && r?.memories?.length && summarizerAvailable() ? await funAnswer(q, r.memories, ctx) : null;
+        const { synth } = synthOn && r?.memories?.length ? await funAnswer(q, r.memories, ctx) : noSynth;
         stop();
         if (!r?.memories?.length) {
           console.log('');
@@ -554,7 +567,7 @@ async function mainCli(): Promise<void> {
         }
         if (opts.raw) return printRaw(answerPrompt(q, r.memories, ctx), 'answer', r.memories.length);
         const bodyLines = synth
-          ? fmtSynth(synth).split('\n')
+          ? renderSynth(synth)
           : r.memories.map((m) => ui.wrapText('• ' + clean(m.content), '  ', 68));
         console.log('');
         console.log(ui.card(`while you were rotting · "${q}"`, [{ body: bodyLines }]));
@@ -562,117 +575,181 @@ async function mainCli(): Promise<void> {
         return;
       }
 
-      // ── --all: engram digest of this repo across every past session ──
-      if (opts.all) {
-        if (!engramEnabled()) return needsEngram('recapping this repo across every past session');
-        const stop = ui.spinner('reading your engram history…');
-        const recap = await getRecap(project);
-        const synth =
-          !opts.raw && recap && (recap.looseEnds.length || recap.work.length) && summarizerAvailable()
-            ? await funRecap(project, recap.looseEnds, recap.work, ctx)
-            : null;
-        stop();
-        if (!recap) {
-          console.log(ui.no('engram unreachable — try again, or `rotpilot engram check`.'));
+      /**
+       * One half of the card. `notes` print under it, dim — scope lines and the
+       * reason a write-up is missing.
+       */
+      interface Half {
+        heading: string;
+        body: string[];
+        notes: string[];
+        /** `--raw`: the exact prompt, its kind, and how many units went in */
+        raw?: [string, string, number];
+      }
+      const asList = (mems: Array<{ content: string }>): string[] =>
+        mems.map((m) => ui.wrapText('• ' + clean(m.content), '  ', 68));
+      const dimLines = (s: string): string[] => s.split('\n').map((l) => ui.dim('  ' + l));
+
+      /**
+       * §1 — what Claude actually did. This session by default (local, no key,
+       * no network); with `--all`, this repo across every session Engram
+       * remembers. DONE work only — what's still owed is §2, and having both
+       * halves report it printed the same item twice.
+       */
+      const buildHappened = async (): Promise<Half> => {
+        // `--all` without Engram falls back to the local session rather than
+        // printing a second "connect engram" pitch under §2's — one upsell per
+        // screen, and the fallback is more useful than an apology.
+        if (opts.all && engramEnabled()) {
+          const heading = 'all sessions';
+          const got = await getRecap(project);
+          if (!got) return { heading, body: dimLines('engram unreachable — try `rotpilot engram check`.'), notes: [] };
+          const { work } = got;
+          // Engram truncates oldest-first with no way to page past it, so a full
+          // page means the RECENT work is what's missing — the opposite of what
+          // this half is for. Say so rather than present stale work as current.
+          const capNote = got.capped
+            ? ['engram returned a full page for this repo — it has no pagination, so the most recent work may be missing']
+            : [];
+          if (!work.length)
+            return {
+              heading,
+              body: dimLines(
+                cfg.engram.shareTranscripts
+                  ? `nothing on record for ${project} yet.\nrot a little; extraction runs async (queue can lag a few minutes).`
+                  : `nothing on record for ${project} yet.\nthe transcript memory is OFF — turn it on with:\nrotpilot engram transcripts on`,
+              ),
+              notes: [],
+            };
+          const { synth, note } = synthOn ? await funRecap(project, work, ctx) : noSynth;
+          return {
+            heading,
+            body: synth ? renderSynth(synth) : asList(work),
+            notes: [...capNote, ...(note ? [note] : [])],
+            raw: [recapPrompt(project, work, ctx), 'recap', work.length],
+          };
+        }
+        const heading = 'this session';
+        const skipped = opts.all ? ['--all needs engram — showing this session instead'] : [];
+        const { localWindow } = await import('./memory/local.js');
+        const messages = localWindow(process.cwd(), 0);
+        const claudeDid = messages.filter((m) => m.role === 'assistant' && (m.content || m.tool_calls?.length));
+        if (!claudeDid.length)
+          return {
+            heading,
+            body: dimLines(
+              messages.length
+                ? 'quiet session — claude did nothing worth catching up on.'
+                : "couldn't find this session's transcript. run recap from the repo you're rotting in.",
+            ),
+            notes: skipped,
+          };
+        const { synth, note } = synthOn ? await funLocalRecap(project, messages, ctx) : noSynth;
+        const body: string[] = [];
+        if (synth) body.push(...renderSynth(synth));
+        else {
+          // Exactly what the synthesizer was handed, so a failure shows you the
+          // real input instead of a different, thinner skim.
+          const { missedLine, digestLines } = await import('./memory/transcript.js');
+          const line = missedLine(messages);
+          if (line) body.push(ui.wrapText(line, '  ', 68));
+          for (const l of digestLines(messages)) body.push(`  ${ui.dim('·')} ${ui.wrapText(l, '    ', 66).trimStart()}`);
+        }
+        return {
+          heading,
+          body,
+          notes: [...skipped, ...(note ? [note] : [])],
+          raw: [localRecapPrompt(project, messages, ctx), 'local', messages.length],
+        };
+      };
+
+      /**
+       * §2 — what's still owed, across every repo and every session.
+       *
+       * The one thing a local transcript physically cannot do: Claude Code's
+       * per-session JSONL rotates, so a question Claude asked while you rotted
+       * dies with the session that asked it. That is why this half — and only
+       * this half — needs Engram, and why the upsell lives here rather than
+       * gating a whole command.
+       */
+      const buildOwed = async (): Promise<Half> => {
+        const heading = 'still on you';
+        if (!engramEnabled())
+          return {
+            heading,
+            body: [
+              ui.dim("  every question claude asks while you rot dies with that session — claude code's"),
+              ui.dim('  transcripts are per-session and rotate. engram keeps them, across every repo.'),
+              '',
+              ui.tip('optional, if you want it —', 'rotpilot engram'),
+            ],
+            notes: [],
+          };
+        const found = await looseEnds({ days });
+        const mems = found?.items ?? [];
+        if (!found || !mems.length)
+          return {
+            heading,
+            body: [
+              ui.dim(
+                found && found.total > 0
+                  ? `  nothing in the last ${days} days. ${found.total}${found.capped ? '+' : ''} older ones are still on the books — rotpilot recap --days 60`
+                  : '  nothing hanging. either you answered everything or you never rotted. sure.',
+              ),
+            ],
+            notes: [],
+          };
+        const { synth, note } = synthOn ? await funLoose(mems, ctx) : noSynth;
+        // Every fallback line gets an age. Without it the list showed a date only
+        // when Engram happened to bake one into its prose — so some items read as
+        // dated and others as timeless, which is worse than none at all.
+        const body = synth
+          ? renderSynth(synth)
+          : mems.flatMap((m) => [
+              ui.wrapText('• ' + m.content.replace(/^On [^,]+, /, ''), '  ', 68),
+              ui.dim(`    ${ageLabel(m)}${m.properties?.project ? ` · ${m.properties.project}` : ''}`),
+            ]);
+        const hidden = found.inWindow - mems.length;
+        const older = found.total - found.inWindow;
+        const scope = [
+          `last ${days} days`,
+          hidden > 0 ? `${hidden} more in range` : null,
+          // `capped`: engram's page is full, so "older" is a floor — say 5+, not 5
+          older > 0 ? `${older}${found.capped ? '+' : ''} older` : null,
+        ]
+          .filter(Boolean)
+          .join(' · ');
+        return { heading, body, notes: [scope, ...(note ? [note] : [])], raw: [loosePrompt(mems, ctx), 'loose', mems.length] };
+      };
+
+      // Concurrently: the two halves hit different sources and each may spawn
+      // its own Haiku, and ~8s twice in a row is a wait nobody should pay for
+      // two independent questions.
+      const stop = ui.spinner(opts.plain ? 'counting what you missed…' : 'catching you up…');
+      const halves = await Promise.all([buildHappened(), buildOwed()]);
+      stop();
+
+      if (opts.raw) {
+        const prompts = halves.map((h) => h.raw).filter(Boolean) as Array<[string, string, number]>;
+        if (!prompts.length) {
+          console.log(ui.no('nothing to summarize — no session transcript and nothing hanging.'));
           process.exitCode = 1;
           return;
         }
-        if (opts.raw && (recap.looseEnds.length || recap.work.length))
-          return printRaw(
-            recapPrompt(project, recap.looseEnds, recap.work, ctx),
-            'recap',
-            recap.looseEnds.length + recap.work.length,
-          );
-        if (!recap.looseEnds.length && !recap.work.length) {
-          const msg = cfg.engram.shareTranscripts
-            ? `nothing on record for ${project} yet.\nrot a little; extraction runs async (queue can lag a few minutes).`
-            : `nothing on record for ${project} yet.\nthe transcript memory is OFF — turn it on with:\nrotpilot engram transcripts on`;
-          console.log('');
-          console.log(ui.card(`recap · ${project} · all sessions`, [{ body: msg.split('\n').map((l) => ui.dim('  ' + l)) }]));
-          console.log('');
-          return;
-        }
-        let sections: CardSection[];
-        if (synth) {
-          sections = [{ body: fmtSynth(synth).split('\n') }];
-        } else {
-          sections = [];
-          if (recap.work.length)
-            sections.push({ heading: 'claude handled', body: recap.work.map((m) => ui.wrapText('• ' + clean(m.content), '  ', 68)) });
-          if (recap.looseEnds.length)
-            sections.push({ heading: 'your move', body: recap.looseEnds.map((m) => ui.wrapText('• ' + clean(m.content), '  ', 68)) });
-        }
-        console.log('');
-        console.log(ui.card(`recap · ${project} · all sessions`, sections));
-        console.log('');
-        console.log(ui.tip('ask anything —', 'rotpilot recap "what was the image bug?"'));
-        console.log('');
+        for (const [prompt, kind, n] of prompts) await printRaw(prompt, kind, n);
         return;
       }
 
-      // ── default: Tier-0 LOCAL recap of the current session (no key, instant) ──
-      let sinceMs = 0;
-      if (opts.since) {
-        const { parseDuration } = await import('./memory/budget.js');
-        const sec = parseDuration(opts.since);
-        if (sec == null) {
-          console.log(ui.no('bad --since value. try 30m or 2h.'));
-          process.exitCode = 1;
-          return;
-        }
-        sinceMs = Date.now() - sec * 1000;
-      }
-      const { localWindow } = await import('./memory/local.js');
-      const stop = ui.spinner('catching you up on this session…');
-      const messages = localWindow(process.cwd(), sinceMs);
-      const claudeDid = messages.filter((m) => m.role === 'assistant' && (m.content || m.tool_calls?.length));
-      const synth =
-        !opts.raw && claudeDid.length && summarizerAvailable() ? await funLocalRecap(project, messages, ctx) : null;
-      stop();
-      if (opts.raw) {
-        if (!messages.length) {
-          console.log(ui.no("no session transcript found to summarize (run recap from the repo you're rotting in)."));
-          process.exitCode = 1;
-          return;
-        }
-        return await printRaw(localRecapPrompt(project, messages, ctx), 'local', messages.length);
-      }
-      if (!claudeDid.length) {
-        const msg = messages.length
-          ? 'quiet session — claude did nothing worth catching up on in this window.'
-          : "couldn't find this session's transcript. run recap from the repo you're rotting in,\nor `rotpilot recap --all` for your engram history.";
-        console.log('');
-        console.log(ui.card(`recap · ${project}`, [{ body: msg.split('\n').map((l) => ui.dim('  ' + l)) }]));
-        console.log('');
-        return;
-      }
-      let sections: CardSection[];
-      if (synth) {
-        sections = [{ body: fmtSynth(synth).split('\n') }];
-      } else {
-        // no local claude to synthesize — a de-noised list of what streamed by
-        const { missedLine } = await import('./memory/transcript.js');
-        const body: string[] = [];
-        const line = missedLine(messages);
-        if (line) body.push(ui.wrapText(line, '  ', 68));
-        for (const m of claudeDid.slice(-6)) {
-          const first = (m.content ?? '').split('\n').find((l) => l.trim());
-          if (first) body.push(ui.wrapText('• ' + first, '  ', 68));
-        }
-        // say why this is the plain version, so a timeout doesn't read as "the
-        // good output is broken"
-        if (summarizerAvailable()) {
-          body.push('');
-          body.push(ui.note('the synthesizer ran long — this is the plain list. ROTPILOT_SUMMARY=0 skips it entirely'));
-        }
-        sections = [{ heading: 'claude handled', body }];
-      }
       console.log('');
-      console.log(ui.card(`recap · ${project}`, sections));
+      console.log(ui.card(`recap · ${project}`, halves.map((h) => ({ heading: h.heading, body: h.body }) as CardSection)));
       console.log('');
-      if (engramEnabled())
-        console.log(ui.tip('ask across every repo —', 'rotpilot recap "what changed in auth?"'));
-      else console.log(ui.note('want recap across sessions & repos? connect the optional engram memory: rotpilot engram'));
+      // Said once, not per half: without this the plain lists read as rotpilot
+      // being broken rather than as a missing prerequisite.
+      const notes = halves.flatMap((h) => h.notes);
+      if (!opts.plain && !summarizerAvailable())
+        notes.push('no `claude` cli on PATH — showing the plain lists (the write-ups use your own claude)');
+      for (const n of notes) console.log(ui.note(n));
+      if (engramEnabled()) console.log(ui.tip('ask across every repo —', 'rotpilot recap "what changed in auth?"'));
       console.log('');
     });
 
@@ -790,59 +867,6 @@ async function mainCli(): Promise<void> {
         console.log('     listen_on unix:/tmp/kitty');
         console.log('   until then rotpilot falls back to a separate window.');
       }
-    });
-
-  // The one thing only Engram can do: the questions Claude asked while you were
-  // rotting outlive the sessions that asked them. Claude Code's transcripts are
-  // per-session JSONL and rotate, so this list is unbuildable locally.
-  program
-    .command('loose')
-    .description("everything claude asked you and never got an answer to — every repo, every session")
-    .option('--raw', 'print the fragments instead of synthesizing')
-    .action(async (opts: { raw?: boolean }) => {
-      const { looseEnds, engramEnabled } = await import('./memory/engram.js');
-      const { funLoose, loosePrompt, summarizerAvailable } = await import('./memory/summarize.js');
-      const { rotContext } = await import('./memory/store.js');
-      if (!engramEnabled()) {
-        console.log('');
-        console.log(
-          ui.card('loose ends · needs engram', [
-            {
-              body: [
-                ui.dim("  every question claude asks while you rot dies with that session — claude code's"),
-                ui.dim('  transcripts are per-session and rotate. this list is the one thing your machine'),
-                ui.dim('  cannot rebuild afterwards, so it needs engram: an optional memory you connect.'),
-              ],
-            },
-            { body: [ui.tip('set it up —', 'rotpilot engram')] },
-          ]),
-        );
-        console.log('');
-        return;
-      }
-      const stop = ui.spinner('counting what you owe…');
-      const mems = await looseEnds();
-      const ctx = rotContext();
-      const synth = !opts.raw && mems?.length && summarizerAvailable() ? await funLoose(mems, ctx) : null;
-      stop();
-      if (!mems?.length) {
-        console.log('');
-        console.log(
-          ui.card('loose ends', [
-            { body: [ui.dim('  nothing hanging. either you answered everything or you never rotted. sure.')] },
-          ]),
-        );
-        console.log('');
-        return;
-      }
-      if (opts.raw) return await printRaw(loosePrompt(mems, ctx), 'loose', mems.length);
-      const body = synth
-        ? fmtSynth(synth).split('\n')
-        : mems.map((m) => ui.wrapText('• ' + m.content.replace(/^On [^,]+, /, ''), '  ', 68));
-      console.log('');
-      console.log(ui.card('loose ends', [{ body }]));
-      console.log('');
-      if (!synth && summarizerAvailable()) console.log(ui.note('synthesizer ran long — raw fragments shown') + '\n');
     });
 
   program

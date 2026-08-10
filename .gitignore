@@ -4,3 +4,6 @@ dist/
 .DS_Store
 seed-stats.mjs
 .rotpilot-demo/
+
+# test build output
+.test-build/
