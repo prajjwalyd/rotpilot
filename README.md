@@ -76,8 +76,9 @@ rotpilot is **per-project and terminal-only**: `rotpilot on` in a project turns 
 | `rotpilot stats` | your rot report — rot ratio, rot by weekday, trend vs usual, your budget meter. screenshot it, you coward |
 | `rotpilot recap` | what you missed this session, plus everything still waiting on you. `--all` / `"question"` reach across sessions & repos (Engram) |
 | `rotpilot budget <amount>` | set a rot ration stats holds you to — `budget 10m` (daily), `budget 1h --weekly`, `budget off` |
-| `rotpilot engram` | set up the Engram memory (`key` / `transcripts on\|off` / `check`) |
-| `rotpilot feed <name>` | switch feed: `localLoop` \| `shorts` \| `instagram` |
+| `rotpilot engram` | set up the Engram memory (`key` / `id` / `transcripts on\|off` / `check`) |
+| `rotpilot feed <name>` | switch feed: `localLoop` \| `shorts` \| `instagram` (`--accept-risk` to opt into Instagram) |
+| `rotpilot loop` | optional: fetch the Subway Surfers clip `localLoop` plays (~20 MB via yt-dlp) |
 | `rotpilot window <mode>` | `panel` (split beside Claude, default) \| `window` (separate) |
 | `rotpilot on` / `off` | per-project switch — turn the rot on/off for the current project |
 | `rotpilot status` / `start` / `stop` | daemon control |
@@ -89,7 +90,7 @@ rotpilot is **per-project and terminal-only**: `rotpilot on` in a project turns 
 - **[kitty](https://sw.kovidgoyal.net/kitty/)** or **[Ghostty](https://ghostty.org) ≥1.3** — the two terminals with real APIs for all three things rotpilot needs: graphics, focus control, and pane spawning.
 - **Google Chrome** — the video engine. rotpilot drives a real, headful Chrome (isolated profile, never your own) and live-captures it into the terminal.
 - **Node 20+**
-- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** (optional, `brew install yt-dlp`) — only for the default `localLoop` feed: `rotpilot init` uses it to download the bundled Subway Surfers loop into your own config dir. Without it, `localLoop` plays a built-in canvas animation instead. Not needed for `shorts`.
+- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** (optional, `brew install yt-dlp`) — only for the default `localLoop` feed. `rotpilot init` never downloads anything; run `rotpilot loop` when you want the Subway Surfers clip fetched into your own config dir (~20 MB, never bundled or redistributed). Without it `localLoop` plays a built-in canvas animation. Not needed for `shorts`.
 
 ## Feeds
 
@@ -164,17 +165,23 @@ rotpilot recap "what changed in auth?"  # ask anything, across every project you
 You watched reels; your memory watched Claude. Weeks later, in any repo, you can ask what happened while you weren't looking — and get a straight, honest answer, not a log dump:
 
 ```
-  rotpilot recap — aura
+▎ recap · aura
+
+▎ all sessions
 
   you were doom-scrolling while claude actually debugged your code. lines
   720-724 in posts.py: exception handler was killing the original image url,
   causing campaign images to fail silently. tragic, honestly.
 
-  claude handled
-  • found it: loop var `img` gets clobbered after `_url_to_data_uri()`…
+  · found it: loop var `img` gets clobbered after `_url_to_data_uri()`
+  · rewrote the handler to preserve the source url and added a regression test
 
-  your move
-  • green-light the code changes to posts.py (claude needs your approval)
+▎ still on you
+
+  four things hanging across three repos, oldest waiting 26 days.
+
+  · aura (3d): green-light the posts.py fix — claude is blocked on you
+  · playground (26d): pick a demo shape, you were asked and said nothing
 ```
 
 The briefing is synthesized at read time by **your own** Claude (the `claude` CLI you already have) running Haiku — no extra key, and it never leaves your machine beyond the Engram memories you opted into. No `claude` on PATH? recap degrades to a clean bulleted list and says why. `rotpilot recap --plain` skips the write-up on demand.

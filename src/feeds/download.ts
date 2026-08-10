@@ -8,6 +8,7 @@ import { spawnSync, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { CONFIG_DIR } from '../config.js';
+import { log } from '../log.js';
 
 // Subway Surfers (2024) gameplay, 9:16, uploaded "No Copyright" by the official
 // Subway Surfers account.
@@ -27,10 +28,29 @@ function loopExists(): boolean {
   return fs.existsSync(LOOP_PATH);
 }
 
-export type LoopStatus = 'present' | 'downloaded' | 'no-ytdlp' | 'failed';
+/** Has the user already fetched the loop? Lets `init` offer it instead of
+ * silently downloading 20MB from a third party on their behalf. */
+export function loopReady(): boolean {
+  return loopExists();
+}
+
+/** Is yt-dlp installed? `rotpilot loop` needs it and says so up front. */
+export function haveYtdlp(): boolean {
+  return have('yt-dlp');
+}
+
+export type LoopStatus = 'present' | 'downloaded' | 'no-ytdlp' | 'blocked' | 'failed';
+
+/** Where a user can put the file themselves if we can't fetch it. */
+export const LOOP_TARGET = LOOP_PATH;
+
+/** The exact command to fetch the loop by hand, cookies included — the remedy
+ * for `blocked`. rotpilot will NOT read your browser cookies on its own; that
+ * is your call to make, so it hands you the command instead. */
+export const MANUAL_LOOP_CMD = `yt-dlp --cookies-from-browser chrome -f 'bv[height<=1080]' -o ${LOOP_PATH} ${DEFAULT_LOOP_URL}`;
 
 /** Ensure loop.mp4 exists. Non-fatal: returns a status the caller reports. */
-export function ensureLoopVideo(url = DEFAULT_LOOP_URL, log: (s: string) => void = () => {}): LoopStatus {
+export function ensureLoopVideo(url = DEFAULT_LOOP_URL, note: (s: string) => void = () => {}): LoopStatus {
   if (loopExists()) return 'present';
   if (!have('yt-dlp')) return 'no-ytdlp';
 
@@ -40,23 +60,31 @@ export function ensureLoopVideo(url = DEFAULT_LOOP_URL, log: (s: string) => void
     fs.rmSync(tmp, { force: true });
   } catch {}
 
-  log('downloading the default brainrot loop (one-time)…');
+  note('downloading the default brainrot loop (one-time)…');
   // video-only, ≤1080 tall, mp4 — no audio needed, and avoids a mux/merge step
+  // stderr is CAPTURED, not inherited: yt-dlp's progress bar rewrites its line
+  // with \r, which off a TTY renders as one enormous wall of percentages. We
+  // still need its text, because the interesting failure is not a network error.
   const dl = spawnSync(
     'yt-dlp',
     ['-f', 'bv[height<=1080][ext=mp4]/bv[height<=1080]/b[height<=1080]', '-o', tmp, url],
-    { stdio: 'inherit' },
+    { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' },
   );
   if (dl.status !== 0 || !fs.existsSync(tmp)) {
+    const err = String(dl.stderr ?? '').trim();
+    log(`yt-dlp failed: ${err.slice(0, 400)}`);
     try {
       fs.rmSync(tmp, { force: true });
     } catch {}
-    return 'failed';
+    // YouTube throttles datacentre and repeat traffic with a bot check. It is
+    // the most likely failure by far, and "network?" sends people debugging
+    // their wifi — it needs cookies, and that is a different remedy entirely.
+    return /sign in to confirm|not a bot|cookies|403|429/i.test(err) ? 'blocked' : 'failed';
   }
 
   if (have('ffmpeg')) {
     // shrink to the panel's native 480×854 and drop audio → a lean loop
-    log('optimizing…');
+    note('optimizing…');
     const ff = spawnSync(
       'ffmpeg',
       // prettier-ignore

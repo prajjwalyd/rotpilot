@@ -284,3 +284,48 @@ export async function activateApp(name: string): Promise<void> {
 export function isTerminalApp(name: string): boolean {
   return /^(kitty|ghostty)$/i.test(name.trim());
 }
+
+/**
+ * Close TV windows nothing owns any more.
+ *
+ * The TV is normally torn down by the daemon that launched it — but a daemon
+ * that dies without cleaning up (crash, kill -9, a machine that slept) leaves
+ * the window running forever, and `uninstall` could not reap it either, since
+ * it asks the daemon to do the closing and there is no daemon left. One was
+ * found still alive 13 days after the daemon that spawned it.
+ *
+ * Matching is on rotpilot's OWN window title, which nothing else sets.
+ */
+export async function killOrphanTvWindows(): Promise<number> {
+  const find = (): Promise<number[]> =>
+    new Promise((resolve) => {
+      execFile('pgrep', ['-f', 'kitty --title=rotpilot-tv'], (_e, out) => {
+        resolve(
+          (out ?? '')
+            .split('\n')
+            .map((s) => Number(s.trim()))
+            .filter((n) => Number.isInteger(n) && n > 0),
+        );
+      });
+    });
+  const signal = (pids: number[], sig: NodeJS.Signals): void => {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, sig);
+      } catch {}
+    }
+  };
+  const before = await find();
+  if (!before.length) return 0;
+  // kitty does not exit on SIGTERM here, so escalate rather than report a
+  // success we never confirmed — the count returned is what actually died.
+  signal(before, 'SIGTERM');
+  await new Promise((r) => setTimeout(r, 400));
+  const stubborn = await find();
+  if (stubborn.length) {
+    signal(stubborn, 'SIGKILL');
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  const after = await find();
+  return before.length - after.length;
+}

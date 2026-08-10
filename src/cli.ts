@@ -5,6 +5,33 @@
 export {};
 import type { CardSection } from './ui.js'; // type-only: erased at runtime, keeps the fast path lean
 
+/**
+ * Module-level data MUST be declared above the dispatch below.
+ *
+ * `await mainCli()` is top-level await: it suspends the rest of this module
+ * body until it resolves. Anything declared after it is therefore still
+ * unassigned while a command runs — and because the bundler emits these as
+ * `var`, they read as `undefined` instead of throwing. That made it a timing
+ * bug rather than a crash: a slow async command (`init`) yields long enough
+ * for the module body to resume and assign them, so it looked fine, while a
+ * synchronous one (`window panel`) completed first and silently rendered
+ * nothing. Keep declarations here and it cannot happen.
+ */
+
+/** The kitty setup as a command you can paste, not two lines to go and find a
+ * file for. `grep -q` guards it, so pasting twice cannot duplicate the keys,
+ * and `>>` creates the file if kitty has never written one. */
+const KITTY_SETUP_CMD =
+  "grep -q '^listen_on' ~/.config/kitty/kitty.conf 2>/dev/null || " +
+  "printf 'allow_remote_control socket-only\\nlisten_on unix:/tmp/kitty\\n' >> ~/.config/kitty/kitty.conf";
+
+/** name → what you're signing up for. Shown by `init`, in feed order of harm. */
+const FEED_BLURBS: Array<[string, string]> = [
+  ['localLoop', 'the default — one local video on loop, no network'],
+  ['shorts', 'youtube shorts'],
+  ['instagram', 'reels — opt-in, at your own risk'],
+];
+
 const fast = process.argv[2];
 
 if (fast === 'hook') {
@@ -20,13 +47,6 @@ if (fast === 'hook') {
 } else {
   await mainCli();
 }
-
-/** name → what you're signing up for. Shown by `init`, in feed order of harm. */
-const FEED_BLURBS: Array<[string, string]> = [
-  ['localLoop', 'the default — one local video on loop, no network'],
-  ['shorts', 'youtube shorts'],
-  ['instagram', 'reels — opt-in, at your own risk'],
-];
 
 async function mainCli(): Promise<void> {
   const { Command } = await import('commander');
@@ -104,6 +124,24 @@ async function mainCli(): Promise<void> {
     try {
       fs.unlinkSync(PID_PATH);
     } catch {}
+    // Sweep daemons the pid file never knew about. A pre-0.2.0 race let a second
+    // daemon clobber the pid file and orphan the first, which then survived every
+    // `stop` — still holding a Chrome and fighting the live daemon for the
+    // profile. The race is fixed, but installs that already have orphans need
+    // this to ever get clean again.
+    const { execFile } = await import('node:child_process');
+    await new Promise<void>((resolve) => {
+      execFile('pgrep', ['-f', 'cli.js _daemon'], (_e: unknown, out: string) => {
+        for (const line of (out ?? '').split('\n')) {
+          const pid = Number(line.trim());
+          if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+          try {
+            process.kill(pid, 'SIGTERM');
+          } catch {}
+        }
+        resolve();
+      });
+    });
     // belt and braces: no orphaned chrome (it would swallow future launches as tabs)
     const { killStaleChrome } = await import('./chrome/launch.js');
     await killStaleChrome();
@@ -149,16 +187,14 @@ async function mainCli(): Promise<void> {
       if (!cfg.engram.userId) cfg.engram.userId = `rotpilot-${(await import('node:crypto')).randomUUID()}`;
       saveConfig(cfg);
       console.log(ui.ok(`config written to ${CONFIG_PATH} (feed: ${cfg.feed})`));
-      // fetch the default brainrot loop into the user's own config dir (never
-      // bundled/redistributed). Only needed for the localLoop feed.
+      // The loop video is NOT fetched here. init should not silently pull 20MB
+      // off youtube on your behalf — it is a third-party download, it can take a
+      // while, and it can fail in ways that have nothing to do with rotpilot.
+      // localLoop works without it (built-in animation), so this is an offer.
       if (cfg.feed === 'localLoop') {
-        const { ensureLoopVideo } = await import('./feeds/download.js');
-        const status = ensureLoopVideo(undefined, (s) => console.log(`  ${s}`));
-        if (status === 'present') console.log(ui.ok('brainrot loop ready'));
-        else if (status === 'downloaded') console.log(ui.ok('brainrot loop downloaded'));
-        else if (status === 'no-ytdlp')
-          console.log(ui.warn('yt-dlp not found — `brew install yt-dlp`, then rerun init for the subway-surfers loop; until then localLoop plays the built-in animation'));
-        else console.log(ui.warn('loop download failed (network?) — localLoop plays the built-in animation for now'));
+        const { loopReady } = await import('./feeds/download.js');
+        if (loopReady()) console.log(ui.ok('brainrot loop ready'));
+        else console.log(ui.note('localLoop plays a built-in animation · `rotpilot loop` fetches the real subway-surfers clip (~20MB)'));
       }
       installHooks(process.cwd());
       console.log(ui.ok(`rotpilot ON for ${process.cwd()}`));
@@ -167,11 +203,10 @@ async function mainCli(): Promise<void> {
       if (!inTerm) {
         console.log('');
         console.log(ui.warn('not a supported terminal — nothing will play here.'));
-        console.log(ui.bullet('rotpilot is terminal-only (never the desktop app or VS Code)'));
+        console.log(ui.bullet('rotpilot is terminal-only (for now)'));
         console.log(ui.bullet('ghostty ≥1.3 — works out of the box'));
-        console.log(ui.bullet('kitty — add two lines to ~/.config/kitty/kitty.conf, then restart:'));
-        console.log(`      ${ui.dim('allow_remote_control socket-only')}`);
-        console.log(`      ${ui.dim('listen_on unix:/tmp/kitty')}`);
+        console.log(ui.bullet('kitty — needs remote control on, then a restart:'));
+        console.log(ui.tip('paste this —', KITTY_SETUP_CMD));
       }
       console.log('');
       console.log(ui.heading('next steps'));
@@ -254,7 +289,7 @@ async function mainCli(): Promise<void> {
 
   program
     .command('engram [action] [value]')
-    .description('optional Engram memory: setup guide · `key` = save API key · `transcripts on|off` = opt in · `check` = live test')
+    .description('optional Engram memory: setup guide · `key` = save API key · `id` = show/restore your memory scope · `transcripts on|off` = opt in · `check` = live test')
     .action(async (action?: string, value?: string) => {
       const {
         TOPIC_DESIGN,
@@ -321,6 +356,39 @@ async function mainCli(): Promise<void> {
         return;
       }
 
+      // Your memories are scoped to this id. It is generated locally on first
+      // run and lives only in config.json — so a reinstall (or a new machine)
+      // mints a fresh one and every existing memory becomes unreachable. The
+      // API key you can re-copy from the console; this you cannot. Hence a way
+      // to read it BEFORE you need it, and to set it back after.
+      if (action === 'id') {
+        const cfg = loadConfig();
+        if (!value) {
+          console.log('');
+          console.log(ui.card('engram · your memory id', [
+            {
+              body: [
+                `  ${ui.bold(cfg.engram.userId)}`,
+                '',
+                ui.dim('  every memory you have is filed under this. it exists only in'),
+                ui.dim('  ~/.config/rotpilot/config.json — save it somewhere you keep things.'),
+              ],
+            },
+          ]));
+          console.log('');
+          console.log(ui.tip('on a new machine, or after a reinstall —', 'rotpilot engram id <that-value>'));
+          console.log('');
+          return;
+        }
+        const prev = cfg.engram.userId;
+        cfg.engram.userId = value.trim();
+        saveConfig(cfg);
+        console.log(ui.ok(`memory id set to ${cfg.engram.userId}`));
+        console.log(ui.note(`was ${prev} — anything filed under that is now out of scope`));
+        console.log(ui.tip('confirm your history is back —', 'rotpilot recap --plain'));
+        return;
+      }
+
       if (action === 'transcripts') {
         if (value !== 'on' && value !== 'off') {
           console.log(ui.no('usage: rotpilot engram transcripts on|off'));
@@ -366,10 +434,14 @@ async function mainCli(): Promise<void> {
         console.log(ui.dim('       both UNBOUNDED:'));
         console.log('');
         for (const t of TOPIC_DESIGN) {
-          console.log(`       ${ui.brand(t.name)}`);
+          console.log(`       ${ui.brand(t.name)}  ${ui.dim(`— powers ${t.powers}`)}`);
           console.log(ui.wrapText(t.description, '         ', 64));
         }
         console.log('');
+        // BOTH is not a style preference. The topic set cannot be changed after
+        // the project is created, so someone who defines one is stuck without
+        // the other for good — and each one is a different half of recap.
+        console.log(ui.dim('       BOTH are required, and you cannot add the second later.'));
         console.log(ui.dim('       (the descriptions are the extraction prompts — editable later)'));
         console.log('');
         console.log(ui.step(2, 'save an API key (created in the console, shown once):'));
@@ -405,7 +477,14 @@ async function mainCli(): Promise<void> {
         return;
       }
       const topics = [...new Set(list.memories.map((m) => m.topic).filter(Boolean))];
-      console.log('    ' + ui.ok(`authenticated${topics.length ? ` — topics seen: ${topics.join(', ')}` : ' (no memories yet)'}`));
+      console.log('    ' + ui.ok(`authenticated${topics.length ? ` — topics seen: ${topics.join(', ')}` : ' (no memories under this id yet)'}`));
+      // A valid key with zero memories is ambiguous: genuinely new, or the right
+      // key against the wrong scope after a reinstall. Say which id we looked
+      // under, so "engram is broken" and "wrong id" stop looking identical.
+      if (!topics.length)
+        console.log(
+          '    ' + ui.note(`looked under ${loadConfig().engram.userId} — if you had memories before, restore it: rotpilot engram id <old-id>`),
+        );
 
       console.log(ui.step(2, 'write — a synthetic marked conversation (scope: rotpilot-check)…'));
       const conv = await sendCheckConversation();
@@ -753,26 +832,67 @@ async function mainCli(): Promise<void> {
       console.log('');
     });
 
+  // Opt-in on purpose: this pulls ~20MB from youtube via yt-dlp. `init` used to
+  // do it silently, which is a surprising thing for a setup command to do with
+  // someone's network and disk — and when youtube's bot check refuses, it fails
+  // in a way that looks like rotpilot is broken. Now you ask for it.
+  program
+    .command('loop')
+    .description('download the subway-surfers clip localLoop plays (~20MB, via yt-dlp — optional)')
+    .action(async () => {
+      const { ensureLoopVideo, haveYtdlp, MANUAL_LOOP_CMD, LOOP_TARGET } = await import('./feeds/download.js');
+      if (!haveYtdlp()) {
+        console.log(ui.warn('yt-dlp not found — it is what fetches the clip'));
+        console.log(ui.tip('install it —', 'brew install yt-dlp'));
+        console.log(ui.note('localLoop plays a built-in animation until then — nothing is broken'));
+        return;
+      }
+      const stop = ui.spinner('fetching the loop from youtube (~20MB, one-time)…');
+      const status = ensureLoopVideo();
+      stop();
+      if (status === 'present') console.log(ui.ok(`already there — ${LOOP_TARGET}`));
+      else if (status === 'downloaded') console.log(ui.ok(`loop ready — ${LOOP_TARGET}`));
+      else if (status === 'blocked') {
+        // The common failure, and it is not a network problem. Cookies are the
+        // fix, and reading someone's browser cookies is their call, not ours.
+        console.log(ui.warn('youtube asked rotpilot to prove it is not a bot'));
+        console.log(ui.dim('   it does this for repeat or datacentre traffic. the fix is cookies from a'));
+        console.log(ui.dim('   logged-in browser, which rotpilot will not read on its own — so, yours:'));
+        console.log(ui.tip('paste this —', MANUAL_LOOP_CMD));
+        console.log(ui.note('or skip it entirely: localLoop plays a built-in animation'));
+      } else {
+        console.log(ui.warn('download failed — see ~/.config/rotpilot/daemon.log for what yt-dlp said'));
+        console.log(ui.note('localLoop plays a built-in animation meanwhile — nothing is broken'));
+      }
+    });
+
   program
     .command('feed <name>')
     .description('switch feed: localLoop | shorts | instagram')
-    .action(async (name: string) => {
+    .option('--accept-risk', 'instagram only: accept the ToS/ban risk (records the consent, so this is asked once)')
+    .action(async (name: string, opts: { acceptRisk?: boolean }) => {
       const cfg = loadConfig();
       if (!['localLoop', 'shorts', 'instagram'].includes(name)) {
         console.log(ui.no('unknown feed. options: localLoop | shorts | instagram'));
         process.exitCode = 1;
         return;
       }
-      if (name === 'instagram' && !cfg.allowInstagram) {
+      if (name === 'instagram' && !cfg.allowInstagram && !opts.acceptRisk) {
         console.log(ui.warn('instagram mode is OPT-IN and at your own risk.'));
         console.log(ui.dim('   automating instagram violates meta\'s terms of service; accounts can get'));
         console.log(ui.dim('   flagged or banned. rotpilot only scrolls (never likes/follows/comments)'));
         console.log(ui.dim('   and uses a real headful chrome, but the risk is yours. use a burner.'));
         console.log('');
-        console.log(ui.tip('to accept — add "allowInstagram": true to', '~/.config/rotpilot/config.json'));
-        console.log(ui.tip('then —', 'rotpilot feed instagram'));
+        // A flag, not "go hand-edit this JSON". The consent still has to be
+        // typed deliberately — it just does not cost you a detour through an
+        // editor to say yes.
+        console.log(ui.tip('to accept —', 'rotpilot feed instagram --accept-risk'));
         process.exitCode = 1;
         return;
+      }
+      if (name === 'instagram' && opts.acceptRisk && !cfg.allowInstagram) {
+        cfg.allowInstagram = true;
+        console.log(ui.ok('instagram risk accepted — recorded, so you will not be asked again'));
       }
       cfg.feed = name as typeof cfg.feed;
       saveConfig(cfg);
@@ -787,7 +907,17 @@ async function mainCli(): Promise<void> {
       const os = await import('node:os');
       const { uninstallHooks, uninstallGlobalHooks } = await import('./hooks/install.js');
       const { CONFIG_DIR, CHROME_PROFILE_DIR } = await import('./config.js');
+      const { engramEnabled } = await import('./memory/engram.js');
+      const { killOrphanTvWindows } = await import('./render/terminal.js');
+      // Read the memory id BEFORE anything is deleted. It is generated locally
+      // and stored nowhere else, so wiping the config orphans every Engram
+      // memory permanently — silently, unless we say so here.
+      const memoryId = engramEnabled() ? loadConfig().engram.userId : null;
       await stopDaemon();
+      // stopDaemon closes the TV the LIVE daemon owns; this gets the ones left
+      // behind by daemons that died without cleaning up, which nothing else can.
+      const orphans = await killOrphanTvWindows();
+      if (orphans) console.log(ui.ok(`closed ${orphans} orphaned tv window${orphans === 1 ? '' : 's'}`));
       console.log(ui.ok('daemon, chrome, and tv stopped'));
       uninstallHooks(process.cwd());
       const scrubbed = uninstallGlobalHooks();
@@ -803,6 +933,26 @@ async function mainCli(): Promise<void> {
       } else {
         fs.rmSync(CONFIG_DIR, { recursive: true, force: true });
         console.log(ui.ok(`removed ${CONFIG_DIR} (config, rot history, chrome profile)`));
+      }
+      // Loud, and last, so it is the thing still on screen afterwards. Your
+      // Engram memories survive this uninstall — but only reachable with the id.
+      if (memoryId && !opts.keepData) {
+        console.log('');
+        console.log(
+          ui.card('keep this — your engram memories outlive this uninstall', [
+            {
+              body: [
+                `  ${ui.bold(memoryId)}`,
+                '',
+                ui.dim('  your memories are still in engram, filed under that id. it was generated'),
+                ui.dim('  on this machine and stored only in the config just deleted — without it'),
+                ui.dim('  a reinstall starts empty and there is no way to get them back.'),
+                '',
+                ui.dim('  after reinstalling:  rotpilot engram id ' + memoryId),
+              ],
+            },
+          ]),
+        );
       }
       console.log('');
       console.log(ui.tip('last step, removes this command itself —', 'npm uninstall -g rotpilot'));
@@ -841,9 +991,8 @@ async function mainCli(): Promise<void> {
         // continuations sit under the ⚠ glyph's text column (3), dim like other
         // secondary prose
         console.log(ui.dim('   rotpilot is terminal-only: run claude in ghostty (≥1.3, works out of the'));
-        console.log(ui.dim('   box) or kitty (needs two lines in ~/.config/kitty/kitty.conf + restart):'));
-        console.log(ui.dim('     allow_remote_control socket-only'));
-        console.log(ui.dim('     listen_on unix:/tmp/kitty'));
+        console.log(ui.dim('   box) or kitty, which needs remote control on and a restart:'));
+        console.log(ui.tip('paste this —', KITTY_SETUP_CMD));
       }
     });
 
@@ -861,11 +1010,9 @@ async function mainCli(): Promise<void> {
       saveConfig(cfg);
       console.log(ui.ok(`tv opens as ${mode === 'panel' ? 'a side panel beside claude' : 'a separate window'}`));
       if (mode === 'panel' && !process.env.KITTY_LISTEN_ON && process.env.TERM_PROGRAM !== 'ghostty') {
-        console.log(ui.warn('kitty remote control not detected — panel mode needs these two lines'));
-        console.log('   in ~/.config/kitty/kitty.conf (then restart kitty):');
-        console.log('     allow_remote_control socket-only');
-        console.log('     listen_on unix:/tmp/kitty');
-        console.log('   until then rotpilot falls back to a separate window.');
+        console.log(ui.warn('kitty remote control not detected — panel mode needs it on, then a restart'));
+        console.log(ui.tip('paste this —', KITTY_SETUP_CMD));
+        console.log(ui.dim('   until then rotpilot falls back to a separate window.'));
       }
     });
 
@@ -931,6 +1078,33 @@ async function mainCli(): Promise<void> {
   program
     .command('hook <event>')
     .description('(internal, called by Claude Code hooks) forward a hook event to the daemon');
+
+  /**
+   * Bare `rotpilot`, before setup, is the real onboarding moment.
+   *
+   * `npm i -g` prints nothing — npm ≥7 hides lifecycle script output unless the
+   * user passes --foreground-scripts, so a postinstall banner is invisible to
+   * almost everyone (measured on npm 11.13). What a new user does next is type
+   * the command they just installed, and a 17-line command dump does not tell
+   * them that rotpilot does nothing at all until `init` wires up the hooks.
+   *
+   * Only when unconfigured: once set up, `rotpilot` is the normal help again.
+   */
+  if (process.argv.length <= 2 && !fs.existsSync(CONFIG_PATH)) {
+    ui.masthead('claude code feeds you brainrot while it works — and yanks it away when it needs you');
+    console.log('');
+    console.log(ui.heading('not set up yet — two steps'));
+    console.log('');
+    console.log(ui.step(1, `cd to a project you want it in, then run ${ui.bold('rotpilot init')}`));
+    console.log(ui.step(2, `restart claude there, ${ui.bold('in kitty or ghostty ≥1.3')} — hooks load at session start`));
+    console.log('');
+    console.log(ui.note('terminal-only for now, and it needs google chrome.'));
+    console.log('');
+    console.log(ui.tip('see it work first, no claude needed —', 'rotpilot demo'));
+    console.log(ui.tip('every command —', 'rotpilot --help'));
+    console.log('');
+    return;
+  }
 
   program.parse();
 }

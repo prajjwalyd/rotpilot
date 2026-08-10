@@ -24,6 +24,7 @@ import {
   ghosttyFocusTerminal,
   ghosttyCloseTerminal,
   automationWasDenied,
+  killOrphanTvWindows,
   type Panel,
   type GhosttyPanel,
 } from '../render/terminal.js';
@@ -33,6 +34,7 @@ import { appendEvent, patchLastLatency, repoLabel } from '../memory/store.js';
 import { sendRotWindow } from '../memory/engram.js';
 import { rotWindowMessages, missedLine, countQuestions } from '../memory/transcript.js';
 import { log } from '../log.js';
+import { claimPidLock, releasePidLock } from './lock.js';
 
 interface TvState {
   sock: net.Socket;
@@ -93,14 +95,12 @@ function pickGreeting(): string {
 export async function runDaemon(): Promise<void> {
   ensureConfigDir();
   // singleton guard: hooks auto-spawn daemons, so a live one must win
-  try {
-    const existing = parseInt(fs.readFileSync(PID_PATH, 'utf8'), 10);
-    if (existing > 0) {
-      process.kill(existing, 0); // throws if dead
-      process.exit(0);
-    }
-  } catch {}
-  fs.writeFileSync(PID_PATH, String(process.pid));
+  if (!claimPidLock(PID_PATH)) process.exit(0);
+  // Holding the lock proves no other daemon is alive, so any TV window still
+  // open belongs to one that died without cleaning up (kill -9, a crash, a
+  // machine that slept). Nothing else would ever close it — one was found alive
+  // 13 days after its daemon was gone.
+  void killOrphanTvWindows().then((n) => n && log('closed', n, 'orphaned tv window(s) from a dead daemon'));
   const cfg = loadConfig();
   log('daemon starting, pid', process.pid, 'feed', cfg.feed);
 
@@ -739,9 +739,9 @@ export async function runDaemon(): Promise<void> {
     try {
       server.close();
     } catch {}
-    try {
-      fs.unlinkSync(PID_PATH);
-    } catch {}
+    // only if we still own it — a successor's pid must never be deleted by a
+    // straggler shutting down, or the next spawn sees a free lock and doubles up
+    releasePidLock(PID_PATH);
     setTimeout(() => process.exit(0), 300);
   }
 

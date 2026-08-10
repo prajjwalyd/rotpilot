@@ -47,3 +47,11 @@ rotpilot engram check    # verifies the key + both topics are wired up correctly
 ```
 
 That's it. From now on, each rot window's transcript slice is sent to your project (only after you opt in with `rotpilot engram transcripts on`), the pipeline splits it into `claude_work` and `loose_ends` memories, and `rotpilot recap` reads them back to you.
+
+### Save your memory id
+
+```
+rotpilot engram id
+```
+
+Your memories are filed under a **memory id** generated on this machine and stored only in `~/.config/rotpilot/config.json`. The API key you can always re-copy from the console; this you cannot. Keep it with the key — on a new machine, or after an uninstall, `rotpilot engram id <that-value>` is what makes your history reachable again. Without it a reinstall starts empty, and the memories are still there but permanently out of reach.

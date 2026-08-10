@@ -95,12 +95,17 @@ export function engramEnabled(): boolean {
 export const TOPIC_DESIGN = [
   {
     name: 'loose_ends',
+    // `powers` is shown in the setup guide: the topic set is immutable after
+    // creation, so a reader deciding whether to bother with the second one needs
+    // to know which feature they would be permanently giving up.
+    powers: 'the "still on you" half of recap',
     description:
       'Things that still need the user: questions Claude Code asked, approvals or input it waited for, ' +
       'warnings it raised, and follow-ups it suggested that remain unresolved.',
   },
   {
     name: 'claude_work',
+    powers: 'recap --all, across past sessions',
     description:
       'Substantive work Claude Code completed while the user was away, and its outcome: features ' +
       'built, bugs fixed, files edited, tests or commands run and their results, decisions made. ' +

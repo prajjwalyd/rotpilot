@@ -125,11 +125,9 @@ function pauseScreen(
   const blocks: Block[] = [
     brandBlock(size),
     { kind: 'gap', rows: 1 },
-    {
-      kind: 'line',
-      text: manual ? '⏸  ROT PAUSED — by you' : '⏸  ROT PAUSED — claude needs you',
-      style: S_HEAD,
-    },
+    // "— claude needs you" is 32 cols against a panel that is often ~26, so the
+    // commonest pause reason was the one the terminal broke mid-word
+    ...fitLines(manual ? '⏸  ROT PAUSED — by you' : '⏸  ROT PAUSED — claude needs you', w, S_HEAD),
     { kind: 'gap', rows: 1 },
     ...wrap(joke, w).map((t): Block => ({ kind: 'line', text: t, style: S_BODY })),
     // the local "while you rotted: …" receipt — the reason to look up
@@ -142,16 +140,42 @@ function pauseScreen(
     { kind: 'gap', rows: 2 },
     ...wrap(status, w).map((t): Block => ({ kind: 'line', text: t, style: S_DIM })),
     { kind: 'gap', rows: 1 },
-    { kind: 'line', text: 'press  r  to resume   ·   q  to dismiss', style: S_DIM },
+    // One key per line. As a single "press r to resume · q to dismiss" this was
+    // wider than the panel, so the TERMINAL wrapped it — on the character, and
+    // the last hint read "dis / miss".
+    ...keyHints(['press  r  to resume', 'press  q  to dismiss'], w),
   ];
   paint(size, blocks);
 }
 
+/**
+ * A line that keeps its hand-tuned spacing when it fits, and is only word-
+ * wrapped when the panel is genuinely too narrow.
+ *
+ * Two things pull against each other here. The panel width is the user's split,
+ * not ours, so a fixed string wider than `w` gets wrapped by the TERMINAL — on
+ * the character, so "dismiss" came out "dis/miss". But `wrap()` splits on
+ * /\s+/ and rejoins with single spaces, which would eat the double spaces that
+ * set off a key letter ("press  r  to resume"). So: pass through untouched when
+ * it fits, wrap only when it must.
+ */
+function fitLines(text: string, w: number, style: string): Block[] {
+  const parts = text.length <= w ? [text] : wrap(text, w);
+  return parts.map((t): Block => ({ kind: 'line', text: t, style }));
+}
+
+/** Key hints, one per line — never two keys on one line, which is what made the
+ * footer too wide to fit in the first place. */
+function keyHints(hints: string[], w: number): Block[] {
+  return hints.flatMap((h) => fitLines(h, w, S_DIM));
+}
+
 function waitingScreen(size: TermSize): void {
+  const w = Math.max(12, size.cols - 4);
   paint(size, [
     brandBlock(size),
     { kind: 'gap', rows: 2 },
-    { kind: 'line', text: 'waiting for claude to get to work', style: S_DIM },
+    ...fitLines('waiting for claude to get to work', w, S_DIM),
   ]);
 }
 
@@ -164,9 +188,9 @@ function greetingScreen(size: TermSize, msg: string): void {
     { kind: 'gap', rows: 2 },
     ...wrap(msg, w).map((t): Block => ({ kind: 'line', text: t, style: S_BODY })),
     { kind: 'gap', rows: 2 },
-    { kind: 'line', text: 'the rot begins when claude does', style: S_DIM },
+    ...fitLines('the rot begins when claude does', w, S_DIM),
     { kind: 'gap', rows: 1 },
-    { kind: 'line', text: 'press  q  to dismiss', style: S_DIM },
+    ...keyHints(['press  q  to dismiss'], w),
   ]);
 }
 
