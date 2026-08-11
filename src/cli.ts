@@ -600,7 +600,10 @@ async function mainCli(): Promise<void> {
       const { rotContext } = await import('./memory/store.js');
       const cfg = loadConfig();
       const ctx = rotContext();
-      const project = path.basename(process.cwd());
+      // the SAME function the daemon writes with — computing it twice is how a
+      // read and a write end up looking in different drawers
+      const { repoLabel } = await import('./memory/store.js');
+      const project = repoLabel(process.cwd()) ?? path.basename(process.cwd());
       const days = Math.max(1, parseInt(opts.days ?? '14', 10) || 14);
       const synthOn = !opts.plain && !opts.raw && summarizerAvailable();
       // fallback (no claude / offline): strip the repeated "On <date>, Claude "

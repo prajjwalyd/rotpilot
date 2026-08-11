@@ -82,6 +82,27 @@ export function rotContext(): string {
   return lines.join('\n');
 }
 
+/**
+ * What to call the project you're rotting in — the scope key for every stat and
+ * every Engram memory.
+ *
+ * The git repo ROOT, not the directory you happen to be sitting in. Plain
+ * basename looked fine until you noticed how many repos contain a folder called
+ * `frontend`: four, on the machine this was found on, all filing into one shared
+ * bucket. `aura/frontend` and `OmniSearch/frontend` became the same project, so
+ * `recap --all` blended them and "still on you" labelled both `(frontend)`,
+ * which tells you nothing about where to go and fix it.
+ *
+ * Walks up for a `.git` rather than shelling out to git, so it costs nothing and
+ * works with no git installed. Falls back to the basename outside a repo.
+ */
 export function repoLabel(cwd?: string): string | undefined {
-  return cwd ? path.basename(cwd) : undefined;
+  if (!cwd) return undefined;
+  let dir = path.resolve(cwd);
+  for (;;) {
+    if (fs.existsSync(path.join(dir, '.git'))) return path.basename(dir);
+    const up = path.dirname(dir);
+    if (up === dir) return path.basename(cwd); // hit the filesystem root
+    dir = up;
+  }
 }
